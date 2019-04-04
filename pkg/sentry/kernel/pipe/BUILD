@@ -35,6 +35,7 @@ go_library(
         "//pkg/sentry/arch",
         "//pkg/sentry/context",
         "//pkg/sentry/device",
+        "//pkg/sentry/kernel",
         "//pkg/sentry/fs",
         "//pkg/sentry/fs/fsutil",
         "//pkg/sentry/usermem",
