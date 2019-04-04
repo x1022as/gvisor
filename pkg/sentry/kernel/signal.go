@@ -20,6 +20,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 )
 
@@ -73,4 +74,19 @@ func SignalInfoNoInfo(sig linux.Signal, sender, receiver *Task) *arch.SignalInfo
 	info.SetPid(int32(receiver.tg.pidns.IDOfThreadGroup(sender.tg)))
 	info.SetUid(int32(sender.Credentials().RealKUID.In(receiver.UserNamespace()).OrOverflow()))
 	return info
+}
+
+// RaiseTaskSignal sends the given signal to task specified by context.
+func RaiseTaskSignal(ctx context.Context, sig linux.Signal) error {
+	if t := TaskFromContext(ctx); t != nil {
+		info := &arch.SignalInfo{
+			Signo: int32(sig),
+			Code:  arch.SignalInfoUser,
+		}
+		info.SetPid(int32(t.PIDNamespace().IDOfTask(t)))
+		info.SetUid(int32(t.Credentials().RealKUID.In(t.UserNamespace()).OrOverflow()))
+		return t.SendSignal(info)
+	}
+
+	return nil
 }

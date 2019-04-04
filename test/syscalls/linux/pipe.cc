@@ -20,12 +20,12 @@
 #include <vector>
 
 #include "gtest/gtest.h"
-#include "gtest/gtest.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "test/util/file_descriptor.h"
+#include "test/util/signal_util.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
 
@@ -258,7 +258,21 @@ TEST_F(PipeTest, WriterSideClosesReadDataFirst) {
   ASSERT_THAT(close(fds[0]), SyscallSucceeds());
 }
 
+static volatile int sigpiped = 0;
+
+void SigpipeHandler(int sig, siginfo_t* info, void* context) {
+  sigpiped = 1;
+}
+
 TEST_F(PipeTest, ReaderSideCloses) {
+  sigpiped = 0;
+
+  struct sigaction sa;
+  sa.sa_sigaction = SigpipeHandler;
+  sigfillset(&sa.sa_mask);
+  sa.sa_flags = SA_SIGINFO;
+  auto scoped_sigcation = ASSERT_NO_ERRNO_AND_VALUE(ScopedSigaction(SIGPIPE, sa));
+
   int fds[2];
   ASSERT_THAT(pipe(fds), SyscallSucceeds());
   ASSERT_THAT(close(fds[0]), SyscallSucceeds());
@@ -266,6 +280,7 @@ TEST_F(PipeTest, ReaderSideCloses) {
   ASSERT_THAT(write(fds[1], &i, sizeof(i)), SyscallFailsWithErrno(EPIPE));
 
   ASSERT_THAT(close(fds[1]), SyscallSucceeds());
+  EXPECT_EQ(1, sigpiped);
 }
 
 TEST_F(PipeTest, CloseTwice) {

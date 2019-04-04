@@ -1234,6 +1234,7 @@ cc_binary(
     linkstatic = 1,
     deps = [
         "//test/util:file_descriptor",
+        "//test/util:signal_util",
         "//test/util:test_main",
         "//test/util:test_util",
         "//test/util:thread_util",

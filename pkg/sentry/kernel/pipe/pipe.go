@@ -25,8 +25,10 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 	"gvisor.googlesource.com/gvisor/pkg/waiter"
@@ -195,6 +197,11 @@ func (p *Pipe) write(ctx context.Context, src usermem.IOSequence) (int64, error)
 		return 0, syscall.EBADF
 	}
 	if !p.HasReaders() {
+		// If the other end of pipe has been closed, we will send SIGPIPE
+		// to application. Please refer to linux related implementation
+		// in fs/pipe.c:pipe_write().
+		kernel.RaiseTaskSignal(ctx, linux.SIGPIPE)
+
 		return 0, syscall.EPIPE
 	}
 
