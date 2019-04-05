@@ -185,7 +185,7 @@ func (e *endpoint) afterLoad() {
 		if len(e.bindAddress) == 0 {
 			e.bindAddress = e.id.LocalAddress
 		}
-		if err := e.Bind(tcpip.FullAddress{Addr: e.bindAddress, Port: e.id.LocalPort}, nil); err != nil {
+		if err := e.Bind(tcpip.FullAddress{Addr: e.bindAddress, Port: e.id.LocalPort}); err != nil {
 			panic("endpoint binding failed: " + err.String())
 		}
 	}
@@ -204,6 +204,9 @@ func (e *endpoint) afterLoad() {
 				e.connectingAddress = e.id.RemoteAddress
 			}
 		}
+		// Reset the scoreboard to reinitialize the sack information as
+		// we do not restore SACK information.
+		e.scoreboard.Reset()
 		if err := e.connect(tcpip.FullAddress{NIC: e.boundNICID, Addr: e.connectingAddress, Port: e.id.RemotePort}, false, e.workerRunning); err != tcpip.ErrConnectStarted {
 			panic("endpoint connecting failed: " + err.String())
 		}
@@ -304,6 +307,7 @@ func loadError(s string) *tcpip.Error {
 		var errors = []*tcpip.Error{
 			tcpip.ErrUnknownProtocol,
 			tcpip.ErrUnknownNICID,
+			tcpip.ErrUnknownDevice,
 			tcpip.ErrUnknownProtocolOption,
 			tcpip.ErrDuplicateNICID,
 			tcpip.ErrDuplicateAddress,
@@ -336,6 +340,7 @@ func loadError(s string) *tcpip.Error {
 			tcpip.ErrNetworkUnreachable,
 			tcpip.ErrMessageTooLong,
 			tcpip.ErrNoBufferSpace,
+			tcpip.ErrBroadcastDisabled,
 		}
 
 		messageToError = make(map[string]*tcpip.Error)

@@ -45,11 +45,11 @@ import (
 //
 // +stateify savable
 type SocketOperations struct {
-	fsutil.PipeSeek      `state:"nosave"`
-	fsutil.NotDirReaddir `state:"nosave"`
-	fsutil.NoFsync       `state:"nosave"`
-	fsutil.NoopFlush     `state:"nosave"`
-	fsutil.NoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek      `state:"nosave"`
+	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileNoFsync       `state:"nosave"`
+	fsutil.FileNoopFlush     `state:"nosave"`
+	fsutil.FileNoMMap        `state:"nosave"`
 	refs.AtomicRefCount
 	socket.SendReceiveTimeout
 
@@ -218,6 +218,8 @@ func (s *SocketOperations) Accept(t *kernel.Task, peerRequested bool, flags int,
 	if e != nil {
 		return 0, nil, 0, syserr.FromError(e)
 	}
+
+	t.Kernel().RecordSocket(ns, linux.AF_UNIX)
 
 	return fd, addr, addrLen, nil
 }

@@ -32,7 +32,6 @@ type udpPacket struct {
 	senderAddress tcpip.FullAddress
 	data          buffer.VectorisedView `state:".(buffer.VectorisedView)"`
 	timestamp     int64
-	hasTimestamp  bool
 	// views is used as buffer for data when its length is large
 	// enough to store a VectorisedView.
 	views [8]buffer.View `state:"nosave"`
@@ -68,20 +67,23 @@ type endpoint struct {
 	rcvBufSizeMax int `state:".(int)"`
 	rcvBufSize    int
 	rcvClosed     bool
-	rcvTimestamp  bool
 
 	// The following fields are protected by the mu mutex.
-	mu           sync.RWMutex `state:"nosave"`
-	sndBufSize   int
-	id           stack.TransportEndpointID
-	state        endpointState
-	bindNICID    tcpip.NICID
-	regNICID     tcpip.NICID
-	route        stack.Route `state:"manual"`
-	dstPort      uint16
-	v6only       bool
-	multicastTTL uint8
-	reusePort    bool
+	mu             sync.RWMutex `state:"nosave"`
+	sndBufSize     int
+	id             stack.TransportEndpointID
+	state          endpointState
+	bindNICID      tcpip.NICID
+	regNICID       tcpip.NICID
+	route          stack.Route `state:"manual"`
+	dstPort        uint16
+	v6only         bool
+	multicastTTL   uint8
+	multicastAddr  tcpip.Address
+	multicastNICID tcpip.NICID
+	multicastLoop  bool
+	reusePort      bool
+	broadcast      bool
 
 	// shutdownFlags represent the current shutdown state of the endpoint.
 	shutdownFlags tcpip.ShutdownFlags
@@ -99,6 +101,7 @@ type endpoint struct {
 	effectiveNetProtos []tcpip.NetworkProtocolNumber
 }
 
+// +stateify savable
 type multicastMembership struct {
 	nicID         tcpip.NICID
 	multicastAddr tcpip.Address
@@ -122,30 +125,10 @@ func newEndpoint(stack *stack.Stack, netProto tcpip.NetworkProtocolNumber, waite
 		//
 		// Linux defaults to TTL=1.
 		multicastTTL:  1,
+		multicastLoop: true,
 		rcvBufSizeMax: 32 * 1024,
 		sndBufSize:    32 * 1024,
 	}
-}
-
-// NewConnectedEndpoint creates a new endpoint in the connected state using the
-// provided route.
-func NewConnectedEndpoint(stack *stack.Stack, r *stack.Route, id stack.TransportEndpointID, waiterQueue *waiter.Queue) (tcpip.Endpoint, *tcpip.Error) {
-	ep := newEndpoint(stack, r.NetProto, waiterQueue)
-
-	// Register new endpoint so that packets are routed to it.
-	if err := stack.RegisterTransportEndpoint(r.NICID(), []tcpip.NetworkProtocolNumber{r.NetProto}, ProtocolNumber, id, ep, ep.reusePort); err != nil {
-		ep.Close()
-		return nil, err
-	}
-
-	ep.id = id
-	ep.route = r.Clone()
-	ep.dstPort = id.RemotePort
-	ep.regNICID = r.NICID()
-
-	ep.state = stateConnected
-
-	return ep, nil
 }
 
 // Close puts the endpoint in a closed state and frees all resources
@@ -202,7 +185,6 @@ func (e *endpoint) Read(addr *tcpip.FullAddress) (buffer.View, tcpip.ControlMess
 	p := e.rcvList.Front()
 	e.rcvList.Remove(p)
 	e.rcvBufSize -= p.data.Size()
-	ts := e.rcvTimestamp
 
 	e.rcvMu.Unlock()
 
@@ -210,12 +192,7 @@ func (e *endpoint) Read(addr *tcpip.FullAddress) (buffer.View, tcpip.ControlMess
 		*addr = p.senderAddress
 	}
 
-	if ts && !p.hasTimestamp {
-		// Linux uses the current time.
-		p.timestamp = e.stack.NowNanoseconds()
-	}
-
-	return p.data.ToView(), tcpip.ControlMessages{HasTimestamp: ts, Timestamp: p.timestamp}, nil
+	return p.data.ToView(), tcpip.ControlMessages{HasTimestamp: true, Timestamp: p.timestamp}, nil
 }
 
 // prepareForWrite prepares the endpoint for sending data. In particular, it
@@ -251,11 +228,38 @@ func (e *endpoint) prepareForWrite(to *tcpip.FullAddress) (retry bool, err *tcpi
 	}
 
 	// The state is still 'initial', so try to bind the endpoint.
-	if err := e.bindLocked(tcpip.FullAddress{}, nil); err != nil {
+	if err := e.bindLocked(tcpip.FullAddress{}); err != nil {
 		return false, err
 	}
 
 	return true, nil
+}
+
+// connectRoute establishes a route to the specified interface or the
+// configured multicast interface if no interface is specified and the
+// specified address is a multicast address.
+func (e *endpoint) connectRoute(nicid tcpip.NICID, addr tcpip.FullAddress) (stack.Route, tcpip.NICID, tcpip.NetworkProtocolNumber, *tcpip.Error) {
+	netProto, err := e.checkV4Mapped(&addr, false)
+	if err != nil {
+		return stack.Route{}, 0, 0, err
+	}
+
+	localAddr := e.id.LocalAddress
+	if header.IsV4MulticastAddress(addr.Addr) || header.IsV6MulticastAddress(addr.Addr) {
+		if nicid == 0 {
+			nicid = e.multicastNICID
+		}
+		if localAddr == "" {
+			localAddr = e.multicastAddr
+		}
+	}
+
+	// Find a route to the desired destination.
+	r, err := e.stack.FindRoute(nicid, localAddr, addr.Addr, netProto, e.multicastLoop)
+	if err != nil {
+		return stack.Route{}, 0, 0, err
+	}
+	return r, nicid, netProto, nil
 }
 
 // Write writes data to the endpoint's peer. This method does not block
@@ -325,15 +329,11 @@ func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-c
 			nicid = e.bindNICID
 		}
 
-		toCopy := *to
-		to = &toCopy
-		netProto, err := e.checkV4Mapped(to, false)
-		if err != nil {
-			return 0, nil, err
+		if to.Addr == header.IPv4Broadcast && !e.broadcast {
+			return 0, nil, tcpip.ErrBroadcastDisabled
 		}
 
-		// Find the enpoint.
-		r, err := e.stack.FindRoute(nicid, e.id.LocalAddress, to.Addr, netProto)
+		r, _, _, err := e.connectRoute(nicid, *to)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -396,26 +396,68 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 
 		e.v6only = v != 0
 
-	case tcpip.TimestampOption:
-		e.rcvMu.Lock()
-		e.rcvTimestamp = v != 0
-		e.rcvMu.Unlock()
-
 	case tcpip.MulticastTTLOption:
 		e.mu.Lock()
 		e.multicastTTL = uint8(v)
 		e.mu.Unlock()
 
+	case tcpip.MulticastInterfaceOption:
+		e.mu.Lock()
+		defer e.mu.Unlock()
+
+		fa := tcpip.FullAddress{Addr: v.InterfaceAddr}
+		netProto, err := e.checkV4Mapped(&fa, false)
+		if err != nil {
+			return err
+		}
+		nic := v.NIC
+		addr := fa.Addr
+
+		if nic == 0 && addr == "" {
+			e.multicastAddr = ""
+			e.multicastNICID = 0
+			break
+		}
+
+		if nic != 0 {
+			if !e.stack.CheckNIC(nic) {
+				return tcpip.ErrBadLocalAddress
+			}
+		} else {
+			nic = e.stack.CheckLocalAddress(0, netProto, addr)
+			if nic == 0 {
+				return tcpip.ErrBadLocalAddress
+			}
+		}
+
+		if e.bindNICID != 0 && e.bindNICID != nic {
+			return tcpip.ErrInvalidEndpointState
+		}
+
+		e.multicastNICID = nic
+		e.multicastAddr = addr
+
 	case tcpip.AddMembershipOption:
+		if !header.IsV4MulticastAddress(v.MulticastAddr) && !header.IsV6MulticastAddress(v.MulticastAddr) {
+			return tcpip.ErrInvalidOptionValue
+		}
+
 		nicID := v.NIC
-		if v.InterfaceAddr != header.IPv4Any {
+		if v.InterfaceAddr == header.IPv4Any {
+			if nicID == 0 {
+				r, err := e.stack.FindRoute(0, "", v.MulticastAddr, header.IPv4ProtocolNumber, false /* multicastLoop */)
+				if err == nil {
+					nicID = r.NICID()
+					r.Release()
+				}
+			}
+		} else {
 			nicID = e.stack.CheckLocalAddress(nicID, e.netProto, v.InterfaceAddr)
 		}
 		if nicID == 0 {
-			return tcpip.ErrNoRoute
+			return tcpip.ErrUnknownDevice
 		}
 
-		// TODO: check that v.MulticastAddr is a multicast address.
 		if err := e.stack.JoinGroup(e.netProto, nicID, v.MulticastAddr); err != nil {
 			return err
 		}
@@ -426,15 +468,26 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 		e.multicastMemberships = append(e.multicastMemberships, multicastMembership{nicID, v.MulticastAddr})
 
 	case tcpip.RemoveMembershipOption:
+		if !header.IsV4MulticastAddress(v.MulticastAddr) && !header.IsV6MulticastAddress(v.MulticastAddr) {
+			return tcpip.ErrInvalidOptionValue
+		}
+
 		nicID := v.NIC
-		if v.InterfaceAddr != header.IPv4Any {
+		if v.InterfaceAddr == header.IPv4Any {
+			if nicID == 0 {
+				r, err := e.stack.FindRoute(0, "", v.MulticastAddr, header.IPv4ProtocolNumber, false /* multicastLoop */)
+				if err == nil {
+					nicID = r.NICID()
+					r.Release()
+				}
+			}
+		} else {
 			nicID = e.stack.CheckLocalAddress(nicID, e.netProto, v.InterfaceAddr)
 		}
 		if nicID == 0 {
-			return tcpip.ErrNoRoute
+			return tcpip.ErrUnknownDevice
 		}
 
-		// TODO: check that v.MulticastAddr is a multicast address.
 		if err := e.stack.LeaveGroup(e.netProto, nicID, v.MulticastAddr); err != nil {
 			return err
 		}
@@ -451,10 +504,21 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 			}
 		}
 
+	case tcpip.MulticastLoopOption:
+		e.mu.Lock()
+		e.multicastLoop = bool(v)
+		e.mu.Unlock()
+
 	case tcpip.ReusePortOption:
 		e.mu.Lock()
 		e.reusePort = v != 0
 		e.mu.Unlock()
+
+	case tcpip.BroadcastOption:
+		e.mu.Lock()
+		e.broadcast = v != 0
+		e.mu.Unlock()
+
 		return nil
 	}
 	return nil
@@ -505,19 +569,27 @@ func (e *endpoint) GetSockOpt(opt interface{}) *tcpip.Error {
 		e.rcvMu.Unlock()
 		return nil
 
-	case *tcpip.TimestampOption:
-		e.rcvMu.Lock()
-		*o = 0
-		if e.rcvTimestamp {
-			*o = 1
-		}
-		e.rcvMu.Unlock()
-		return nil
-
 	case *tcpip.MulticastTTLOption:
 		e.mu.Lock()
 		*o = tcpip.MulticastTTLOption(e.multicastTTL)
 		e.mu.Unlock()
+		return nil
+
+	case *tcpip.MulticastInterfaceOption:
+		e.mu.Lock()
+		*o = tcpip.MulticastInterfaceOption{
+			e.multicastNICID,
+			e.multicastAddr,
+		}
+		e.mu.Unlock()
+		return nil
+
+	case *tcpip.MulticastLoopOption:
+		e.mu.RLock()
+		v := e.multicastLoop
+		e.mu.RUnlock()
+
+		*o = tcpip.MulticastLoopOption(v)
 		return nil
 
 	case *tcpip.ReusePortOption:
@@ -533,6 +605,17 @@ func (e *endpoint) GetSockOpt(opt interface{}) *tcpip.Error {
 
 	case *tcpip.KeepaliveEnabledOption:
 		*o = 0
+		return nil
+
+	case *tcpip.BroadcastOption:
+		e.mu.RLock()
+		v := e.broadcast
+		e.mu.RUnlock()
+
+		*o = 0
+		if v {
+			*o = 1
+		}
 		return nil
 
 	default:
@@ -558,17 +641,17 @@ func sendUDP(r *stack.Route, data buffer.VectorisedView, localPort, remotePort u
 
 	// Only calculate the checksum if offloading isn't supported.
 	if r.Capabilities()&stack.CapabilityChecksumOffload == 0 {
-		xsum := r.PseudoHeaderChecksum(ProtocolNumber)
+		xsum := r.PseudoHeaderChecksum(ProtocolNumber, length)
 		for _, v := range data.Views() {
 			xsum = header.Checksum(v, xsum)
 		}
-		udp.SetChecksum(^udp.CalculateChecksum(xsum, length))
+		udp.SetChecksum(^udp.CalculateChecksum(xsum))
 	}
 
 	// Track count of packets sent.
 	r.Stats().UDP.PacketsSent.Increment()
 
-	return r.WritePacket(hdr, data, ProtocolNumber, ttl)
+	return r.WritePacket(nil /* gso */, hdr, data, ProtocolNumber, ttl)
 }
 
 func (e *endpoint) checkV4Mapped(addr *tcpip.FullAddress, allowMismatch bool) (tcpip.NetworkProtocolNumber, *tcpip.Error) {
@@ -629,13 +712,7 @@ func (e *endpoint) Connect(addr tcpip.FullAddress) *tcpip.Error {
 		return tcpip.ErrInvalidEndpointState
 	}
 
-	netProto, err := e.checkV4Mapped(&addr, false)
-	if err != nil {
-		return err
-	}
-
-	// Find a route to the desired destination.
-	r, err := e.stack.FindRoute(nicid, e.id.LocalAddress, addr.Addr, netProto)
+	r, nicid, netProto, err := e.connectRoute(nicid, addr)
 	if err != nil {
 		return err
 	}
@@ -743,7 +820,7 @@ func (e *endpoint) registerWithStack(nicid tcpip.NICID, netProtos []tcpip.Networ
 	return id, err
 }
 
-func (e *endpoint) bindLocked(addr tcpip.FullAddress, commit func() *tcpip.Error) *tcpip.Error {
+func (e *endpoint) bindLocked(addr tcpip.FullAddress) *tcpip.Error {
 	// Don't allow binding once endpoint is not in the initial state
 	// anymore.
 	if e.state != stateInitial {
@@ -766,9 +843,11 @@ func (e *endpoint) bindLocked(addr tcpip.FullAddress, commit func() *tcpip.Error
 		}
 	}
 
+	nicid := addr.NIC
 	if len(addr.Addr) != 0 {
 		// A local address was specified, verify that it's valid.
-		if e.stack.CheckLocalAddress(addr.NIC, netProto, addr.Addr) == 0 {
+		nicid = e.stack.CheckLocalAddress(addr.NIC, netProto, addr.Addr)
+		if nicid == 0 {
 			return tcpip.ErrBadLocalAddress
 		}
 	}
@@ -777,21 +856,13 @@ func (e *endpoint) bindLocked(addr tcpip.FullAddress, commit func() *tcpip.Error
 		LocalPort:    addr.Port,
 		LocalAddress: addr.Addr,
 	}
-	id, err = e.registerWithStack(addr.NIC, netProtos, id)
+	id, err = e.registerWithStack(nicid, netProtos, id)
 	if err != nil {
 		return err
 	}
-	if commit != nil {
-		if err := commit(); err != nil {
-			// Unregister, the commit failed.
-			e.stack.UnregisterTransportEndpoint(addr.NIC, netProtos, ProtocolNumber, id, e)
-			e.stack.ReleasePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort)
-			return err
-		}
-	}
 
 	e.id = id
-	e.regNICID = addr.NIC
+	e.regNICID = nicid
 	e.effectiveNetProtos = netProtos
 
 	// Mark endpoint as bound.
@@ -806,16 +877,17 @@ func (e *endpoint) bindLocked(addr tcpip.FullAddress, commit func() *tcpip.Error
 
 // Bind binds the endpoint to a specific local address and port.
 // Specifying a NIC is optional.
-func (e *endpoint) Bind(addr tcpip.FullAddress, commit func() *tcpip.Error) *tcpip.Error {
+func (e *endpoint) Bind(addr tcpip.FullAddress) *tcpip.Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	err := e.bindLocked(addr, commit)
+	err := e.bindLocked(addr)
 	if err != nil {
 		return err
 	}
 
-	e.bindNICID = addr.NIC
+	// Save the effective NICID generated by bindLocked.
+	e.bindNICID = e.regNICID
 
 	return nil
 }
@@ -903,10 +975,7 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, vv
 	e.rcvList.PushBack(pkt)
 	e.rcvBufSize += vv.Size()
 
-	if e.rcvTimestamp {
-		pkt.timestamp = e.stack.NowNanoseconds()
-		pkt.hasTimestamp = true
-	}
+	pkt.timestamp = e.stack.NowNanoseconds()
 
 	e.rcvMu.Unlock()
 

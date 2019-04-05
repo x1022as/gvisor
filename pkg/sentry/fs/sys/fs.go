@@ -24,6 +24,8 @@ import (
 // +stateify savable
 type filesystem struct{}
 
+var _ fs.Filesystem = (*filesystem)(nil)
+
 func init() {
 	fs.RegisterFilesystem(&filesystem{})
 }
@@ -55,7 +57,7 @@ func (*filesystem) Flags() fs.FilesystemFlags {
 }
 
 // Mount returns a sysfs root which can be positioned in the vfs.
-func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string) (*fs.Inode, error) {
+func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string, _ interface{}) (*fs.Inode, error) {
 	// device is always ignored.
 	// sysfs ignores data, see fs/sysfs/mount.c:sysfs_mount.
 

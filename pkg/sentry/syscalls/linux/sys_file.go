@@ -23,6 +23,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/lock"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/tmpfs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/fasync"
@@ -933,6 +934,15 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	case linux.F_SETOWN:
 		fSetOwn(t, file, args[2].Int())
 		return 0, nil, nil
+	case linux.F_GET_SEALS:
+		val, err := tmpfs.GetSeals(file.Dirent.Inode)
+		return uintptr(val), nil, err
+	case linux.F_ADD_SEALS:
+		if !file.Flags().Write {
+			return 0, nil, syserror.EPERM
+		}
+		err := tmpfs.AddSeals(file.Dirent.Inode, args[2].Uint())
+		return 0, nil, err
 	default:
 		// Everything else is not yet supported.
 		return 0, nil, syserror.EINVAL
@@ -1688,7 +1698,13 @@ func utimes(t *kernel.Task, dirFD kdefs.FD, addr usermem.Addr, ts fs.TimeSpec, r
 			}
 		}
 
-		return d.Inode.SetTimestamps(t, d, ts)
+		if err := d.Inode.SetTimestamps(t, d, ts); err != nil {
+			return err
+		}
+
+		// File attribute changed, generate notification.
+		d.InotifyEvent(linux.IN_ATTRIB, 0)
+		return nil
 	}
 
 	// From utimes.c:
@@ -2022,7 +2038,6 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 	}
 
 	// Setup for sending data.
-	var offset uint64
 	var n int64
 	var err error
 	w := &fs.FileWriter{t, outFile}
@@ -2034,14 +2049,18 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 			return 0, nil, syserror.ESPIPE
 		}
 		// Copy in the offset.
+		var offset int64
 		if _, err := t.CopyIn(offsetAddr, &offset); err != nil {
 			return 0, nil, err
 		}
+		if offset < 0 {
+			return 0, nil, syserror.EINVAL
+		}
 		// Send data using Preadv.
-		r := io.NewSectionReader(&fs.FileReader{t, inFile}, int64(offset), count)
+		r := io.NewSectionReader(&fs.FileReader{t, inFile}, offset, count)
 		n, err = io.Copy(w, r)
 		// Copy out the new offset.
-		if _, err := t.CopyOut(offsetAddr, n+int64(offset)); err != nil {
+		if _, err := t.CopyOut(offsetAddr, n+offset); err != nil {
 			return 0, nil, err
 		}
 		// If we don't have a provided offset.
@@ -2062,4 +2081,53 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 	// We can only pass a single file to handleIOError, so pick inFile
 	// arbitrarily.
 	return uintptr(n), nil, handleIOError(t, n != 0, err, kernel.ERESTARTSYS, "sendfile", inFile)
+}
+
+const (
+	memfdPrefix     = "/memfd:"
+	memfdAllFlags   = uint32(linux.MFD_CLOEXEC | linux.MFD_ALLOW_SEALING)
+	memfdMaxNameLen = linux.NAME_MAX - len(memfdPrefix) + 1
+)
+
+// MemfdCreate implements the linux syscall memfd_create(2).
+func MemfdCreate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+	addr := args[0].Pointer()
+	flags := args[1].Uint()
+
+	if flags&^memfdAllFlags != 0 {
+		// Unknown bits in flags.
+		return 0, nil, syserror.EINVAL
+	}
+
+	allowSeals := flags&linux.MFD_ALLOW_SEALING != 0
+	cloExec := flags&linux.MFD_CLOEXEC != 0
+
+	name, err := t.CopyInString(addr, syscall.PathMax-len(memfdPrefix))
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(name) > memfdMaxNameLen {
+		return 0, nil, syserror.EINVAL
+	}
+	name = memfdPrefix + name
+
+	inode := tmpfs.NewMemfdInode(t, allowSeals)
+	dirent := fs.NewDirent(inode, name)
+	// Per Linux, mm/shmem.c:__shmem_file_setup(), memfd files are set up with
+	// FMODE_READ | FMODE_WRITE.
+	file, err := inode.GetFile(t, dirent, fs.FileFlags{Read: true, Write: true})
+	if err != nil {
+		return 0, nil, err
+	}
+
+	defer dirent.DecRef()
+	defer file.DecRef()
+
+	fdFlags := kernel.FDFlags{CloseOnExec: cloExec}
+	newFD, err := t.FDMap().NewFDFrom(0, file, fdFlags, t.ThreadGroup().Limits())
+	if err != nil {
+		return 0, nil, err
+	}
+
+	return uintptr(newFD), nil, nil
 }

@@ -1,6 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_embed_data")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_stateify:defs.bzl", "go_library")
 
@@ -39,7 +39,7 @@ go_library(
         "//pkg/sentry/limits",
         "//pkg/sentry/memmap",
         "//pkg/sentry/mm",
-        "//pkg/sentry/platform",
+        "//pkg/sentry/pgalloc",
         "//pkg/sentry/safemem",
         "//pkg/sentry/uniqueid",
         "//pkg/sentry/usage",

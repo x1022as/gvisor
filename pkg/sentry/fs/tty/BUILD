@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
@@ -7,7 +7,6 @@ go_library(
     srcs = [
         "dir.go",
         "fs.go",
-        "inode.go",
         "line_discipline.go",
         "master.go",
         "queue.go",
@@ -25,7 +24,7 @@ go_library(
         "//pkg/sentry/fs",
         "//pkg/sentry/fs/fsutil",
         "//pkg/sentry/kernel/auth",
-        "//pkg/sentry/kernel/time",
+        "//pkg/sentry/safemem",
         "//pkg/sentry/socket/unix/transport",
         "//pkg/sentry/unimpl",
         "//pkg/sentry/usermem",

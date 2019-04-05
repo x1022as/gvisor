@@ -50,7 +50,7 @@ type Filesystem interface {
 	// data options.
 	//
 	// Mount may return arbitrary errors. They do not need syserr translations.
-	Mount(ctx context.Context, device string, flags MountSourceFlags, data string) (*Inode, error)
+	Mount(ctx context.Context, device string, flags MountSourceFlags, data string, dataObj interface{}) (*Inode, error)
 
 	// AllowUserMount determines whether mount(2) is allowed to mount a
 	// file system of this type.
@@ -140,6 +140,10 @@ type MountSourceFlags struct {
 	// cache, even when the platform supports direct mapped I/O. This
 	// doesn't correspond to any Linux mount options.
 	ForcePageCache bool
+
+	// NoExec corresponds to mount(2)'s "MS_NOEXEC" and indicates that
+	// binaries from this file system can't be executed.
+	NoExec bool
 }
 
 // GenericMountSourceOptions splits a string containing comma separated tokens of the

@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_stateify:defs.bzl", "go_library")
 
@@ -63,6 +63,7 @@ go_library(
         "//pkg/sentry/fs/anon",
         "//pkg/sentry/fs/lock",
         "//pkg/sentry/fs/timerfd",
+        "//pkg/sentry/fs/tmpfs",
         "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/kernel/epoll",

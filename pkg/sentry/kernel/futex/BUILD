@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -8,7 +8,7 @@ go_template_instance(
     out = "atomicptr_bucket.go",
     package = "futex",
     suffix = "Bucket",
-    template = "//pkg/sync:generic_atomicptr",
+    template = "//third_party/gvsync:generic_atomicptr",
     types = {
         "Value": "bucket",
     },
@@ -37,6 +37,8 @@ go_library(
     visibility = ["//pkg/sentry:internal"],
     deps = [
         "//pkg/abi/linux",
+        "//pkg/log",
+        "//pkg/sentry/context",
         "//pkg/sentry/memmap",
         "//pkg/sentry/usermem",
         "//pkg/syserror",

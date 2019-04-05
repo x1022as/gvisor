@@ -191,19 +191,43 @@ const (
 	SO_TXTIME                = 61
 )
 
+// enum socket_state, from uapi/linux/net.h.
+const (
+	SS_FREE          = 0 // Not allocated.
+	SS_UNCONNECTED   = 1 // Unconnected to any socket.
+	SS_CONNECTING    = 2 // In process of connecting.
+	SS_CONNECTED     = 3 // Connected to socket.
+	SS_DISCONNECTING = 4 // In process of disconnecting.
+)
+
 // SockAddrMax is the maximum size of a struct sockaddr, from
 // uapi/linux/socket.h.
 const SockAddrMax = 128
 
-// SockAddrInt is struct sockaddr_in, from uapi/linux/in.h.
+// InetAddr is struct in_addr, from uapi/linux/in.h.
+type InetAddr [4]byte
+
+// SockAddrInet is struct sockaddr_in, from uapi/linux/in.h.
 type SockAddrInet struct {
 	Family uint16
 	Port   uint16
-	Addr   [4]byte
+	Addr   InetAddr
 	Zero   [8]uint8 // pad to sizeof(struct sockaddr).
 }
 
-// SockAddrInt6 is struct sockaddr_in6, from uapi/linux/in6.h.
+// InetMulticastRequest is struct ip_mreq, from uapi/linux/in.h.
+type InetMulticastRequest struct {
+	MulticastAddr InetAddr
+	InterfaceAddr InetAddr
+}
+
+// InetMulticastRequestWithNIC is struct ip_mreqn, from uapi/linux/in.h.
+type InetMulticastRequestWithNIC struct {
+	InetMulticastRequest
+	InterfaceIndex int32
+}
+
+// SockAddrInet6 is struct sockaddr_in6, from uapi/linux/in6.h.
 type SockAddrInet6 struct {
 	Family   uint16
 	Port     uint16
@@ -343,3 +367,10 @@ const SizeOfControlMessageRight = 4
 // SCM_MAX_FD is the maximum number of FDs accepted in a single sendmsg call.
 // From net/scm.h.
 const SCM_MAX_FD = 253
+
+// SO_ACCEPTCON is defined as __SO_ACCEPTCON in
+// include/uapi/linux/net.h, which represents a listening socket
+// state. Note that this is distinct from SO_ACCEPTCONN, which is a
+// socket option for querying whether a socket is in a listening
+// state.
+const SO_ACCEPTCON = 1 << 16

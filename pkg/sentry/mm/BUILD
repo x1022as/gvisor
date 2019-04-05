@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -111,14 +111,15 @@ go_library(
         "//pkg/sentry/kernel/shm",
         "//pkg/sentry/limits",
         "//pkg/sentry/memmap",
+        "//pkg/sentry/pgalloc",
         "//pkg/sentry/platform",
         "//pkg/sentry/platform/safecopy",
         "//pkg/sentry/safemem",
         "//pkg/sentry/usage",
         "//pkg/sentry/usermem",
-        "//pkg/sync",
         "//pkg/syserror",
         "//pkg/tcpip/buffer",
+        "//third_party/gvsync",
     ],
 )
 
@@ -133,6 +134,7 @@ go_test(
         "//pkg/sentry/context/contexttest",
         "//pkg/sentry/limits",
         "//pkg/sentry/memmap",
+        "//pkg/sentry/pgalloc",
         "//pkg/sentry/platform",
         "//pkg/sentry/usermem",
         "//pkg/syserror",

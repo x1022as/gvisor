@@ -273,6 +273,16 @@ Creator<SocketPair> UDPBidirectionalBindSocketPairCreator(int domain, int type,
                                                           int protocol,
                                                           bool dual_stack);
 
+// UDPUnboundSocketPairCreator returns a Creator<SocketPair> that obtains file
+// descriptors by creating UDP sockets.
+Creator<SocketPair> UDPUnboundSocketPairCreator(int domain, int type,
+                                                int protocol, bool dual_stack);
+
+// UnboundSocketCreator returns a Creator<FileDescriptor> that obtains a file
+// descriptor by creating a socket.
+Creator<FileDescriptor> UnboundSocketCreator(int domain, int type,
+                                             int protocol);
+
 // A SocketPairKind couples a human-readable description of a socket pair with
 // a function that creates such a socket pair.
 struct SocketPairKind {
@@ -443,6 +453,23 @@ void RecvNoData(int sock);
 // Base test fixture for tests that apply to all kinds of pairs of connected
 // sockets.
 using AllSocketPairTest = SocketPairTest;
+
+struct TestAddress {
+  std::string description;
+  sockaddr_storage addr;
+  socklen_t addr_len;
+
+  int family() const { return addr.ss_family; }
+  explicit TestAddress(std::string description = "")
+      : description(std::move(description)), addr(), addr_len() {}
+};
+
+TestAddress V4Any();
+TestAddress V4Loopback();
+TestAddress V4MappedAny();
+TestAddress V4MappedLoopback();
+TestAddress V6Any();
+TestAddress V6Loopback();
 
 }  // namespace testing
 }  // namespace gvisor

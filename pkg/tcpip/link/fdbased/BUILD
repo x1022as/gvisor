@@ -1,10 +1,15 @@
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "fdbased",
-    srcs = ["endpoint.go"],
+    srcs = [
+        "endpoint.go",
+        "endpoint_unsafe.go",
+        "mmap.go",
+        "mmap_amd64_unsafe.go",
+    ],
     importpath = "gvisor.googlesource.com/gvisor/pkg/tcpip/link/fdbased",
     visibility = [
         "//visibility:public",
@@ -15,6 +20,7 @@ go_library(
         "//pkg/tcpip/header",
         "//pkg/tcpip/link/rawfile",
         "//pkg/tcpip/stack",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
@@ -27,6 +33,7 @@ go_test(
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
         "//pkg/tcpip/header",
+        "//pkg/tcpip/link/rawfile",
         "//pkg/tcpip/stack",
     ],
 )

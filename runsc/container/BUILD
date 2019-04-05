@@ -1,12 +1,11 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "container",
     srcs = [
         "container.go",
-        "fs.go",
         "hook.go",
         "status.go",
     ],
@@ -34,8 +33,8 @@ go_test(
     srcs = [
         "console_test.go",
         "container_test.go",
-        "fs_test.go",
         "multi_container_test.go",
+        "shared_volume_test.go",
     ],
     data = [
         ":test_app",
@@ -65,7 +64,9 @@ go_test(
 
 go_binary(
     name = "test_app",
+    testonly = 1,
     srcs = ["test_app.go"],
+    pure = "on",
     deps = [
         "//runsc/test/testutil",
         "@com_github_google_subcommands//:go_default_library",

@@ -1,6 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "cmd",
@@ -8,6 +8,7 @@ go_library(
         "boot.go",
         "capability.go",
         "checkpoint.go",
+        "chroot.go",
         "cmd.go",
         "create.go",
         "debug.go",
@@ -59,6 +60,7 @@ go_test(
         "capability_test.go",
         "delete_test.go",
         "exec_test.go",
+        "gofer_test.go",
     ],
     data = [
         "//runsc",

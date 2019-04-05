@@ -119,6 +119,12 @@ type Container struct {
 	// be 0 if the gofer has been killed.
 	GoferPid int `json:"goferPid"`
 
+	// goferIsChild is set if a gofer process is a child of the current process.
+	//
+	// This field isn't saved to json, because only a creator of a gofer
+	// process will have it as a child process.
+	goferIsChild bool
+
 	// Sandbox is the sandbox this container is running in. It's set when the
 	// container is created and reset when the sandbox is destroyed.
 	Sandbox *sandbox.Sandbox `json:"sandbox"`
@@ -131,7 +137,7 @@ type Container struct {
 func Load(rootDir, id string) (*Container, error) {
 	log.Debugf("Load container %q %q", rootDir, id)
 	if err := validateID(id); err != nil {
-		return nil, fmt.Errorf("error validating id: %v", err)
+		return nil, fmt.Errorf("validating id: %v", err)
 	}
 
 	cRoot, err := findContainerRoot(rootDir, id)
@@ -156,11 +162,11 @@ func Load(rootDir, id string) (*Container, error) {
 			// Preserve error so that callers can distinguish 'not found' errors.
 			return nil, err
 		}
-		return nil, fmt.Errorf("error reading container metadata file %q: %v", metaFile, err)
+		return nil, fmt.Errorf("reading container metadata file %q: %v", metaFile, err)
 	}
 	var c Container
 	if err := json.Unmarshal(metaBytes, &c); err != nil {
-		return nil, fmt.Errorf("error unmarshaling container metadata from %q: %v", metaFile, err)
+		return nil, fmt.Errorf("unmarshaling container metadata from %q: %v", metaFile, err)
 	}
 
 	// If the status is "Running" or "Created", check that the sandbox
@@ -219,7 +225,7 @@ func List(rootDir string) ([]string, error) {
 	log.Debugf("List containers %q", rootDir)
 	fs, err := ioutil.ReadDir(rootDir)
 	if err != nil {
-		return nil, fmt.Errorf("ReadDir(%s) failed: %v", rootDir, err)
+		return nil, fmt.Errorf("reading dir %q: %v", rootDir, err)
 	}
 	var out []string
 	for _, f := range fs {
@@ -251,7 +257,7 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 	if _, err := os.Stat(filepath.Join(containerRoot, metadataFilename)); err == nil {
 		return nil, fmt.Errorf("container with id %q already exists", id)
 	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("error looking for existing container in %q: %v", containerRoot, err)
+		return nil, fmt.Errorf("looking for existing container in %q: %v", containerRoot, err)
 	}
 
 	c := &Container{
@@ -261,6 +267,7 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 		BundleDir:     bundleDir,
 		Root:          containerRoot,
 		Status:        Creating,
+		CreatedAt:     time.Now(),
 		Owner:         os.Getenv("USER"),
 	}
 	// The Cleanup object cleans up partially created containers when an error occurs.
@@ -275,21 +282,12 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 	if specutils.ShouldCreateSandbox(spec) {
 		log.Debugf("Creating new sandbox for container %q", id)
 
-		// Setup rootfs and mounts. It returns a new mount list with destination
-		// paths resolved. Since the spec for the root container is read from disk,
-		// Write the new spec to a new file that will be used by the sandbox.
-		cleanMounts, err := setupFS(spec, conf, bundleDir)
-		if err != nil {
-			return nil, fmt.Errorf("setup mounts: %v", err)
-		}
-		spec.Mounts = cleanMounts
-		if err := specutils.WriteCleanSpec(bundleDir, spec); err != nil {
-			return nil, fmt.Errorf("writing clean spec: %v", err)
-		}
-
 		// Create and join cgroup before processes are created to ensure they are
 		// part of the cgroup from the start (and all tneir children processes).
-		cg := cgroup.New(spec)
+		cg, err := cgroup.New(spec)
+		if err != nil {
+			return nil, err
+		}
 		if cg != nil {
 			// If there is cgroup config, install it before creating sandbox process.
 			if err := cg.Install(spec.Linux.Resources); err != nil {
@@ -297,14 +295,14 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 			}
 		}
 		if err := runInCgroup(cg, func() error {
-			ioFiles, err := c.createGoferProcess(spec, conf, bundleDir)
+			ioFiles, specFile, err := c.createGoferProcess(spec, conf, bundleDir)
 			if err != nil {
 				return err
 			}
 
 			// Start a new sandbox for this container. Any errors after this point
 			// must destroy the container.
-			c.Sandbox, err = sandbox.New(id, spec, conf, bundleDir, consoleSocket, userLog, ioFiles, cg)
+			c.Sandbox, err = sandbox.New(id, spec, conf, bundleDir, consoleSocket, userLog, ioFiles, specFile, cg)
 			return err
 		}); err != nil {
 			return nil, err
@@ -378,26 +376,22 @@ func (c *Container) Start(conf *boot.Config) error {
 			return err
 		}
 	} else {
-		// Setup rootfs and mounts. It returns a new mount list with destination
-		// paths resolved. Replace the original spec with new mount list and start
-		// container.
-		cleanMounts, err := setupFS(c.Spec, conf, c.BundleDir)
-		if err != nil {
-			return fmt.Errorf("setup mounts: %v", err)
-		}
-		c.Spec.Mounts = cleanMounts
-		if err := specutils.WriteCleanSpec(c.BundleDir, c.Spec); err != nil {
-			return fmt.Errorf("writing clean spec: %v", err)
-		}
-
 		// Join cgroup to strt gofer process to ensure it's part of the cgroup from
 		// the start (and all tneir children processes).
 		if err := runInCgroup(c.Sandbox.Cgroup, func() error {
 			// Create the gofer process.
-			ioFiles, err := c.createGoferProcess(c.Spec, conf, c.BundleDir)
+			ioFiles, mountsFile, err := c.createGoferProcess(c.Spec, conf, c.BundleDir)
 			if err != nil {
 				return err
 			}
+			defer mountsFile.Close()
+
+			cleanMounts, err := specutils.ReadMounts(mountsFile)
+			if err != nil {
+				return fmt.Errorf("reading mounts file: %v", err)
+			}
+			c.Spec.Mounts = cleanMounts
+
 			return c.Sandbox.StartContainer(c.Spec, conf, c.ID, ioFiles)
 		}); err != nil {
 			return err
@@ -440,14 +434,14 @@ func Run(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSocke
 	log.Debugf("Run container %q in root dir: %s", id, conf.RootDir)
 	c, err := Create(id, spec, conf, bundleDir, consoleSocket, pidFile, userLog)
 	if err != nil {
-		return 0, fmt.Errorf("error creating container: %v", err)
+		return 0, fmt.Errorf("creating container: %v", err)
 	}
 	// Clean up partially created container if an error ocurrs.
 	// Any errors returned by Destroy() itself are ignored.
 	defer c.Destroy()
 
 	if err := c.Start(conf); err != nil {
-		return 0, fmt.Errorf("error starting container: %v", err)
+		return 0, fmt.Errorf("starting container: %v", err)
 	}
 	return c.Wait()
 }
@@ -589,7 +583,7 @@ func (c *Container) Pause() error {
 	}
 
 	if err := c.Sandbox.Pause(c.ID); err != nil {
-		return fmt.Errorf("error pausing container: %v", err)
+		return fmt.Errorf("pausing container: %v", err)
 	}
 	c.changeStatus(Paused)
 	return c.save()
@@ -609,7 +603,7 @@ func (c *Container) Resume() error {
 		return fmt.Errorf("cannot resume container %q in state %v", c.ID, c.Status)
 	}
 	if err := c.Sandbox.Resume(c.ID); err != nil {
-		return fmt.Errorf("error resuming container: %v", err)
+		return fmt.Errorf("resuming container: %v", err)
 	}
 	c.changeStatus(Running)
 	return c.save()
@@ -651,22 +645,18 @@ func (c *Container) Destroy() error {
 	var errs []string
 
 	if err := c.stop(); err != nil {
-		err = fmt.Errorf("error stopping container: %v", err)
-		log.Warningf("%v", err)
-		errs = append(errs, err.Error())
-	}
-
-	if err := destroyFS(c.Spec); err != nil {
-		err = fmt.Errorf("error destroying container fs: %v", err)
+		err = fmt.Errorf("stopping container: %v", err)
 		log.Warningf("%v", err)
 		errs = append(errs, err.Error())
 	}
 
 	if err := os.RemoveAll(c.Root); err != nil && !os.IsNotExist(err) {
-		err = fmt.Errorf("error deleting container root directory %q: %v", c.Root, err)
+		err = fmt.Errorf("deleting container root directory %q: %v", c.Root, err)
 		log.Warningf("%v", err)
 		errs = append(errs, err.Error())
 	}
+
+	c.changeStatus(Stopped)
 
 	// "If any poststop hook fails, the runtime MUST log a warning, but the
 	// remaining hooks and lifecycle continue as if the hook had succeeded" -OCI spec.
@@ -679,8 +669,6 @@ func (c *Container) Destroy() error {
 	if c.Spec.Hooks != nil {
 		executeHooksBestEffort(c.Spec.Hooks.Poststop, c.State())
 	}
-
-	c.changeStatus(Stopped)
 
 	if len(errs) == 0 {
 		return nil
@@ -696,10 +684,10 @@ func (c *Container) save() error {
 	metaFile := filepath.Join(c.Root, metadataFilename)
 	meta, err := json.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("error marshaling container metadata: %v", err)
+		return fmt.Errorf("invalid container metadata: %v", err)
 	}
 	if err := ioutil.WriteFile(metaFile, meta, 0640); err != nil {
-		return fmt.Errorf("error writing container metadata: %v", err)
+		return fmt.Errorf("writing container metadata: %v", err)
 	}
 	return nil
 }
@@ -708,10 +696,16 @@ func (c *Container) save() error {
 // root containers), and waits for the container or sandbox and the gofer
 // to stop. If any of them doesn't stop before timeout, an error is returned.
 func (c *Container) stop() error {
+	var cgroup *cgroup.Cgroup
+
 	if c.Sandbox != nil {
 		log.Debugf("Destroying container %q", c.ID)
 		if err := c.Sandbox.DestroyContainer(c.ID); err != nil {
-			return fmt.Errorf("error destroying container %q: %v", c.ID, err)
+			return fmt.Errorf("destroying container %q: %v", c.ID, err)
+		}
+		// Only uninstall cgroup for sandbox stop.
+		if c.Sandbox.IsRootContainer(c.ID) {
+			cgroup = c.Sandbox.Cgroup
 		}
 		// Only set sandbox to nil after it has been told to destroy the container.
 		c.Sandbox = nil
@@ -725,7 +719,18 @@ func (c *Container) stop() error {
 			log.Warningf("Error sending signal %d to gofer %d: %v", syscall.SIGKILL, c.GoferPid, err)
 		}
 	}
-	return c.waitForStopped()
+
+	if err := c.waitForStopped(); err != nil {
+		return err
+	}
+
+	// Gofer is running in cgroups, so Cgroup.Uninstall has to be called after it.
+	if cgroup != nil {
+		if err := cgroup.Uninstall(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Container) waitForStopped() error {
@@ -738,44 +743,100 @@ func (c *Container) waitForStopped() error {
 				return fmt.Errorf("container is still running")
 			}
 		}
-		if c.GoferPid != 0 {
-			if err := syscall.Kill(c.GoferPid, 0); err == nil {
+		if c.GoferPid == 0 {
+			return nil
+		}
+		if c.goferIsChild {
+			// The gofer process is a child of the current process,
+			// so we can wait it and collect its zombie.
+			wpid, err := syscall.Wait4(int(c.GoferPid), nil, syscall.WNOHANG, nil)
+			if err != nil {
+				return fmt.Errorf("error waiting the gofer process: %v", err)
+			}
+			if wpid == 0 {
 				return fmt.Errorf("gofer is still running")
 			}
-			c.GoferPid = 0
+
+		} else if err := syscall.Kill(c.GoferPid, 0); err == nil {
+			return fmt.Errorf("gofer is still running")
 		}
+		c.GoferPid = 0
 		return nil
 	}
 	return backoff.Retry(op, b)
 }
 
-func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bundleDir string) ([]*os.File, error) {
+func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bundleDir string) ([]*os.File, *os.File, error) {
 	// Start with the general config flags.
 	args := conf.ToFlags()
+
+	var goferEnds []*os.File
+
+	// nextFD is the next available file descriptor for the gofer process.
+	// It starts at 3 because 0-2 are used by stdin/stdout/stderr.
+	nextFD := 3
+
+	if conf.LogFilename != "" {
+		logFile, err := os.OpenFile(conf.LogFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening log file %q: %v", conf.LogFilename, err)
+		}
+		defer logFile.Close()
+		goferEnds = append(goferEnds, logFile)
+		args = append(args, "--log-fd="+strconv.Itoa(nextFD))
+		nextFD++
+	}
+
+	if conf.DebugLog != "" {
+		debugLogFile, err := specutils.DebugLogFile(conf.DebugLog, "gofer")
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening debug log file in %q: %v", conf.DebugLog, err)
+		}
+		defer debugLogFile.Close()
+		goferEnds = append(goferEnds, debugLogFile)
+		args = append(args, "--debug-log-fd="+strconv.Itoa(nextFD))
+		nextFD++
+	}
+
 	args = append(args, "gofer", "--bundle", bundleDir)
 	if conf.Overlay {
 		args = append(args, "--panic-on-write=true")
 	}
 
+	// Open the spec file to donate to the sandbox.
+	specFile, err := specutils.OpenSpec(bundleDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening spec file: %v", err)
+	}
+	defer specFile.Close()
+	goferEnds = append(goferEnds, specFile)
+	args = append(args, "--spec-fd="+strconv.Itoa(nextFD))
+	nextFD++
+
+	// Create pipe that allows gofer to send mount list to sandbox after all paths
+	// have been resolved.
+	mountsSand, mountsGofer, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer mountsGofer.Close()
+	goferEnds = append(goferEnds, mountsGofer)
+	args = append(args, fmt.Sprintf("--mounts-fd=%d", nextFD))
+	nextFD++
+
 	// Add root mount and then add any other additional mounts.
 	mountCount := 1
-
-	// Add additional mounts.
 	for _, m := range spec.Mounts {
 		if specutils.Is9PMount(m) {
 			mountCount++
 		}
 	}
-	sandEnds := make([]*os.File, 0, mountCount)
-	goferEnds := make([]*os.File, 0, mountCount)
 
-	// nextFD is the next available file descriptor for the gofer process.
-	// It starts at 3 because 0-2 are used by stdin/stdout/stderr.
-	nextFD := 3
-	for ; nextFD-3 < mountCount; nextFD++ {
+	sandEnds := make([]*os.File, 0, mountCount)
+	for i := 0; i < mountCount; i++ {
 		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		sandEnds = append(sandEnds, os.NewFile(uintptr(fds[0]), "sandbox IO FD"))
 
@@ -784,14 +845,13 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bund
 		goferEnds = append(goferEnds, goferEnd)
 
 		args = append(args, fmt.Sprintf("--io-fds=%d", nextFD))
+		nextFD++
 	}
 
-	binPath, err := specutils.BinPath()
-	if err != nil {
-		return nil, err
-	}
+	binPath := specutils.ExePath
 	cmd := exec.Command(binPath, args...)
 	cmd.ExtraFiles = goferEnds
+	cmd.Args[0] = "runsc-gofer"
 
 	// Enter new namespaces to isolate from the rest of the system. Don't unshare
 	// cgroup because gofer is added to a cgroup in the caller's namespace.
@@ -812,11 +872,12 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bund
 	// Start the gofer in the given namespace.
 	log.Debugf("Starting gofer: %s %v", binPath, args)
 	if err := specutils.StartInNS(cmd, nss); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	log.Infof("Gofer started, PID: %d", cmd.Process.Pid)
 	c.GoferPid = cmd.Process.Pid
-	return sandEnds, nil
+	c.goferIsChild = true
+	return sandEnds, mountsSand, nil
 }
 
 // changeStatus transitions from one status to another ensuring that the
@@ -884,12 +945,12 @@ func (c *Container) lock() (func() error, error) {
 // given container root directory.
 func lockContainerMetadata(containerRootDir string) (func() error, error) {
 	if err := os.MkdirAll(containerRootDir, 0711); err != nil {
-		return nil, fmt.Errorf("error creating container root directory %q: %v", containerRootDir, err)
+		return nil, fmt.Errorf("creating container root directory %q: %v", containerRootDir, err)
 	}
 	f := filepath.Join(containerRootDir, metadataLockFilename)
 	l := flock.NewFlock(f)
 	if err := l.Lock(); err != nil {
-		return nil, fmt.Errorf("error acquiring lock on container lock file %q: %v", f, err)
+		return nil, fmt.Errorf("acquiring lock on container lock file %q: %v", f, err)
 	}
 	return l.Unlock, nil
 }

@@ -3,7 +3,14 @@
 #   normal system VDSO (time, gettimeofday, clock_gettimeofday) but which uses
 #   timekeeping parameters managed by the sandbox kernel.
 
-package(licenses = ["notice"])  # Apache 2.0
+load("@bazel_tools//tools/cpp:cc_flags_supplier.bzl", "cc_flags_supplier")
+
+package(licenses = ["notice"])
+
+config_setting(
+    name = "x86_64",
+    constraint_values = ["@bazel_tools//platforms:x86_64"],
+)
 
 genrule(
     name = "vdso",
@@ -30,7 +37,10 @@ genrule(
           # VDSO has no hooks to handle failures.
           "-fno-stack-protector " +
           "-fuse-ld=gold " +
-          "-m64 " +
+          select({
+              ":x86_64": "-m64 ",
+              "//conditions:default": "",
+          }) +
           "-shared " +
           "-nostdlib " +
           "-Wl,-soname=linux-vdso.so.1 " +
@@ -47,11 +57,19 @@ genrule(
           "--check-data " +
           "--vdso $(location vdso.so) ",
     features = ["-pie"],
-    toolchains = ["@bazel_tools//tools/cpp:current_cc_toolchain"],
+    toolchains = [
+        "@bazel_tools//tools/cpp:current_cc_toolchain",
+        ":no_pie_cc_flags",
+    ],
     tools = [
         ":check_vdso",
     ],
     visibility = ["//:sandbox"],
+)
+
+cc_flags_supplier(
+    name = "no_pie_cc_flags",
+    features = ["-pie"],
 )
 
 py_binary(

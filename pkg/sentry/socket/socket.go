@@ -147,6 +147,7 @@ func New(t *kernel.Task, family int, stype transport.SockType, protocol int) (*f
 			return nil, err
 		}
 		if s != nil {
+			t.Kernel().RecordSocket(s, family)
 			return s, nil
 		}
 	}
@@ -163,12 +164,15 @@ func Pair(t *kernel.Task, family int, stype transport.SockType, protocol int) (*
 	}
 
 	for _, p := range providers {
-		s, t, err := p.Pair(t, stype, protocol)
+		s1, s2, err := p.Pair(t, stype, protocol)
 		if err != nil {
 			return nil, nil, err
 		}
-		if s != nil && t != nil {
-			return s, t, nil
+		if s1 != nil && s2 != nil {
+			k := t.Kernel()
+			k.RecordSocket(s1, family)
+			k.RecordSocket(s2, family)
+			return s1, s2, nil
 		}
 	}
 
@@ -178,18 +182,12 @@ func Pair(t *kernel.Task, family int, stype transport.SockType, protocol int) (*
 // NewDirent returns a sockfs fs.Dirent that resides on device d.
 func NewDirent(ctx context.Context, d *device.Device) *fs.Dirent {
 	ino := d.NextIno()
-	// There is no real filesystem backing this pipe, so we pass in a nil
-	// Filesystem.
-	inode := fs.NewInode(fsutil.NewSimpleInodeOperations(fsutil.InodeSimpleAttributes{
-		FSType: linux.SOCKFS_MAGIC,
-		UAttr: fs.WithCurrentTime(ctx, fs.UnstableAttr{
-			Owner: fs.FileOwnerFromContext(ctx),
-			Perms: fs.FilePermissions{
-				User: fs.PermMask{Read: true, Write: true},
-			},
-			Links: 1,
-		}),
-	}), fs.NewNonCachingMountSource(nil, fs.MountSourceFlags{}), fs.StableAttr{
+	iops := &fsutil.SimpleFileInode{
+		InodeSimpleAttributes: fsutil.NewInodeSimpleAttributes(ctx, fs.FileOwnerFromContext(ctx), fs.FilePermissions{
+			User: fs.PermMask{Read: true, Write: true},
+		}, linux.SOCKFS_MAGIC),
+	}
+	inode := fs.NewInode(iops, fs.NewPseudoMountSource(), fs.StableAttr{
 		Type:      fs.Socket,
 		DeviceID:  d.DeviceID(),
 		InodeID:   ino,

@@ -24,7 +24,8 @@
 //         mm.MemoryManager.activeMu
 //           Locks taken by memmap.Mappable.Translate
 //             mm.privateRefs.mu
-//               platform.File locks
+//               platform.AddressSpace locks
+//                 platform.File locks
 //         mm.aioManager.mu
 //           mm.AIOContext.mu
 //
@@ -39,20 +40,20 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
-	ssync "gvisor.googlesource.com/gvisor/pkg/sync"
+	"gvisor.googlesource.com/gvisor/third_party/gvsync"
 )
 
 // MemoryManager implements a virtual address space.
 //
 // +stateify savable
 type MemoryManager struct {
-	// p is the platform.
-	//
-	// p is immutable.
-	p platform.Platform
+	// p and mfp are immutable.
+	p   platform.Platform
+	mfp pgalloc.MemoryFileProvider
 
 	// haveASIO is the cached result of p.SupportsAddressSpaceIO(). Aside from
 	// eliminating an indirect call in the hot I/O path, this makes
@@ -70,9 +71,6 @@ type MemoryManager struct {
 	// ownership is shared by one or more pmas instead of being owned by a
 	// memmap.Mappable).
 	//
-	// NOTE: This should be replaced using refcounts on
-	// platform.File.
-	//
 	// privateRefs is immutable.
 	privateRefs *privateRefs
 
@@ -84,7 +82,7 @@ type MemoryManager struct {
 	users int32
 
 	// mappingMu is analogous to Linux's struct mm_struct::mmap_sem.
-	mappingMu ssync.DowngradableRWMutex `state:"nosave"`
+	mappingMu gvsync.DowngradableRWMutex `state:"nosave"`
 
 	// vmas stores virtual memory areas. Since vmas are stored by value,
 	// clients should usually use vmaIterator.ValuePtr() instead of
@@ -121,7 +119,7 @@ type MemoryManager struct {
 
 	// activeMu is loosely analogous to Linux's struct
 	// mm_struct::page_table_lock.
-	activeMu ssync.DowngradableRWMutex `state:"nosave"`
+	activeMu gvsync.DowngradableRWMutex `state:"nosave"`
 
 	// pmas stores platform mapping areas used to implement vmas. Since pmas
 	// are stored by value, clients should usually use pmaIterator.ValuePtr()
@@ -368,25 +366,39 @@ func (v *vma) loadRealPerms(b int) {
 // +stateify savable
 type pma struct {
 	// file is the file mapped by this pma. Only pmas for which file ==
-	// platform.Platform.Memory() may be saved. pmas hold a reference to the
-	// corresponding file range while they exist.
+	// MemoryManager.mfp.MemoryFile() may be saved. pmas hold a reference to
+	// the corresponding file range while they exist.
 	file platform.File `state:"nosave"`
 
 	// off is the offset into file at which this pma begins.
+	//
+	// Note that pmas do *not* hold references on offsets in file! If private
+	// is true, MemoryManager.privateRefs holds the reference instead. If
+	// private is false, the corresponding memmap.Mappable holds the reference
+	// instead (per memmap.Mappable.Translate requirement).
 	off uint64
 
-	// vmaEffectivePerms and vmaMaxPerms are duplicated from the
-	// corresponding vma so that the IO implementation can avoid iterating
-	// mm.vmas when pmas already exist.
-	vmaEffectivePerms usermem.AccessType
-	vmaMaxPerms       usermem.AccessType
+	// translatePerms is the permissions returned by memmap.Mappable.Translate.
+	// If private is true, translatePerms is usermem.AnyAccess.
+	translatePerms usermem.AccessType
+
+	// effectivePerms is the permissions allowed for non-ignorePermissions
+	// accesses. maxPerms is the permissions allowed for ignorePermissions
+	// accesses. These are vma.effectivePerms and vma.maxPerms respectively,
+	// masked by pma.translatePerms and with Write disallowed if pma.needCOW is
+	// true.
+	//
+	// These are stored in the pma so that the IO implementation can avoid
+	// iterating mm.vmas when pmas already exist.
+	effectivePerms usermem.AccessType
+	maxPerms       usermem.AccessType
 
 	// needCOW is true if writes to the mapping must be propagated to a copy.
 	needCOW bool
 
 	// private is true if this pma represents private memory.
 	//
-	// If private is true, file must be platform.Platform.Memory(), the pma
+	// If private is true, file must be MemoryManager.mfp.MemoryFile(), the pma
 	// holds a reference on the mapped memory that is tracked in privateRefs,
 	// and calls to Invalidate for which
 	// memmap.InvalidateOpts.InvalidatePrivate is false should ignore the pma.
@@ -404,9 +416,9 @@ type pma struct {
 type privateRefs struct {
 	mu sync.Mutex `state:"nosave"`
 
-	// refs maps offsets into Platform.Memory() to the number of pmas (or,
-	// equivalently, MemoryManagers) that share ownership of the memory at that
-	// offset.
+	// refs maps offsets into MemoryManager.mfp.MemoryFile() to the number of
+	// pmas (or, equivalently, MemoryManagers) that share ownership of the
+	// memory at that offset.
 	refs fileRefcountSet
 }
 

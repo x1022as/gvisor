@@ -15,15 +15,18 @@
 package proc
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 
+	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/ramfs"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
+	"gvisor.googlesource.com/gvisor/pkg/waiter"
 )
 
 // execArgType enumerates the types of exec arguments that are exposed through
@@ -35,12 +38,12 @@ const (
 	environExecArg
 )
 
-// execArgFile is a file containing the exec args (either cmdline or environ)
+// execArgInode is a inode containing the exec args (either cmdline or environ)
 // for a given task.
 //
 // +stateify savable
-type execArgFile struct {
-	ramfs.Entry
+type execArgInode struct {
+	fsutil.SimpleFileInode
 
 	// arg is the type of exec argument this file contains.
 	arg execArgType
@@ -49,30 +52,55 @@ type execArgFile struct {
 	t *kernel.Task
 }
 
+var _ fs.InodeOperations = (*execArgInode)(nil)
+
 // newExecArgFile creates a file containing the exec args of the given type.
-func newExecArgFile(t *kernel.Task, msrc *fs.MountSource, arg execArgType) *fs.Inode {
+func newExecArgInode(t *kernel.Task, msrc *fs.MountSource, arg execArgType) *fs.Inode {
 	if arg != cmdlineExecArg && arg != environExecArg {
 		panic(fmt.Sprintf("unknown exec arg type %v", arg))
 	}
-	f := &execArgFile{
-		arg: arg,
-		t:   t,
+	f := &execArgInode{
+		SimpleFileInode: *fsutil.NewSimpleFileInode(t, fs.RootOwner, fs.FilePermsFromMode(0444), linux.PROC_SUPER_MAGIC),
+		arg:             arg,
+		t:               t,
 	}
-	f.InitEntry(t, fs.RootOwner, fs.FilePermsFromMode(0444))
-	return newFile(f, msrc, fs.SpecialFile, t)
+	return newProcInode(f, msrc, fs.SpecialFile, t)
 }
 
-// DeprecatedPreadv reads the exec arg from the process's address space..
-func (f *execArgFile) DeprecatedPreadv(ctx context.Context, dst usermem.IOSequence, offset int64) (int64, error) {
+// GetFile implements fs.InodeOperations.GetFile.
+func (i *execArgInode) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFlags) (*fs.File, error) {
+	return fs.NewFile(ctx, dirent, flags, &execArgFile{
+		arg: i.arg,
+		t:   i.t,
+	}), nil
+}
+
+// +stateify savable
+type execArgFile struct {
+	waiter.AlwaysReady       `state:"nosave"`
+	fsutil.FileGenericSeek   `state:"nosave"`
+	fsutil.FileNoIoctl       `state:"nosave"`
+	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileNoopRelease   `state:"nosave"`
+	fsutil.FileNoopFlush     `state:"nosave"`
+	fsutil.FileNoopFsync     `state:"nosave"`
+	fsutil.FileNoopWrite     `state:"nosave"`
+
+	// arg is the type of exec argument this file contains.
+	arg execArgType
+
+	// t is the Task to read the exec arg line from.
+	t *kernel.Task
+}
+
+var _ fs.FileOperations = (*execArgFile)(nil)
+
+// Read reads the exec arg from the process's address space..
+func (f *execArgFile) Read(ctx context.Context, _ *fs.File, dst usermem.IOSequence, offset int64) (int64, error) {
 	if offset < 0 {
 		return 0, syserror.EINVAL
 	}
-
-	// N.B. Linux 4.2 eliminates the arbitrary one page limit.
-	if offset > usermem.PageSize {
-		return 0, io.EOF
-	}
-	dst = dst.TakeFirst64(usermem.PageSize - offset)
 
 	m, err := getTaskMM(f.t)
 	if err != nil {
@@ -112,20 +140,62 @@ func (f *execArgFile) DeprecatedPreadv(ctx context.Context, dst usermem.IOSequen
 	// N.B. Technically this should be usermem.IOOpts.IgnorePermissions = true
 	// until Linux 4.9 (272ddc8b3735 "proc: don't use FOLL_FORCE for reading
 	// cmdline and environment").
-	copyN, copyErr := m.CopyIn(ctx, start, buf, usermem.IOOpts{})
+	copyN, err := m.CopyIn(ctx, start, buf, usermem.IOOpts{})
 	if copyN == 0 {
 		// Nothing to copy.
-		return 0, copyErr
+		return 0, err
 	}
 	buf = buf[:copyN]
 
-	// TODO: On Linux, if the NUL byte at the end of the
-	// argument vector has been overwritten, it continues reading the
-	// environment vector as part of the argument vector.
+	// On Linux, if the NUL byte at the end of the argument vector has been
+	// overwritten, it continues reading the environment vector as part of
+	// the argument vector.
+
+	if f.arg == cmdlineExecArg && buf[copyN-1] != 0 {
+		// Linux will limit the return up to and including the first null character in argv
+
+		copyN = bytes.IndexByte(buf, 0)
+		if copyN == -1 {
+			copyN = len(buf)
+		}
+		// If we found a NUL character in argv, return upto and including that character.
+		if copyN < len(buf) {
+			buf = buf[:copyN]
+		} else { // Otherwise return into envp.
+			lengthEnvv := int(m.EnvvEnd() - m.EnvvStart())
+
+			// Upstream limits the returned amount to one page of slop.
+			// https://elixir.bootlin.com/linux/v4.20/source/fs/proc/base.c#L208
+			// we'll return one page total between argv and envp because of the
+			// above page restrictions.
+			if lengthEnvv > usermem.PageSize-len(buf) {
+				lengthEnvv = usermem.PageSize - len(buf)
+			}
+			// Make a new buffer to fit the whole thing
+			tmp := make([]byte, length+lengthEnvv)
+			copyNE, err := m.CopyIn(ctx, m.EnvvStart(), tmp[copyN:], usermem.IOOpts{})
+			if err != nil {
+				return 0, err
+			}
+
+			// Linux will return envp up to and including the first NUL character, so find it.
+			for i, c := range tmp[copyN:] {
+				if c == 0 {
+					copyNE = i
+					break
+				}
+			}
+
+			copy(tmp, buf)
+			buf = tmp[:copyN+copyNE]
+
+		}
+
+	}
 
 	n, dstErr := dst.CopyOut(ctx, buf)
 	if dstErr != nil {
 		return int64(n), dstErr
 	}
-	return int64(n), copyErr
+	return int64(n), err
 }

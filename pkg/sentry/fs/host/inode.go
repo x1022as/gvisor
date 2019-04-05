@@ -39,7 +39,6 @@ import (
 type inodeOperations struct {
 	fsutil.InodeNotVirtual           `state:"nosave"`
 	fsutil.InodeNoExtendedAttributes `state:"nosave"`
-	fsutil.DeprecatedFileOperations  `state:"nosave"`
 
 	// fileState implements fs.CachedFileObject. It exists
 	// to break a circular load dependency between inodeOperations
@@ -297,7 +296,7 @@ func (i *inodeOperations) RemoveDirectory(ctx context.Context, dir *fs.Inode, na
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (i *inodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string) error {
+func (i *inodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	op, ok := oldParent.InodeOperations.(*inodeOperations)
 	if !ok {
 		return syscall.EXDEV

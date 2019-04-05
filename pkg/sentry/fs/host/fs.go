@@ -58,6 +58,8 @@ type Filesystem struct {
 	paths []string
 }
 
+var _ fs.Filesystem = (*Filesystem)(nil)
+
 // Name is the identifier of this file system.
 func (*Filesystem) Name() string {
 	return FilesystemName
@@ -80,7 +82,7 @@ func (*Filesystem) Flags() fs.FilesystemFlags {
 
 // Mount returns an fs.Inode exposing the host file system.  It is intended to be locked
 // down in PreExec below.
-func (f *Filesystem) Mount(ctx context.Context, _ string, flags fs.MountSourceFlags, data string) (*fs.Inode, error) {
+func (f *Filesystem) Mount(ctx context.Context, _ string, flags fs.MountSourceFlags, data string, _ interface{}) (*fs.Inode, error) {
 	// Parse generic comma-separated key=value options.
 	options := fs.GenericMountSourceOptions(data)
 

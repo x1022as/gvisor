@@ -52,10 +52,11 @@ type DefaultRoute struct {
 
 // FDBasedLink configures an fd-based link.
 type FDBasedLink struct {
-	Name      string
-	MTU       int
-	Addresses []net.IP
-	Routes    []Route
+	Name       string
+	MTU        int
+	Addresses  []net.IP
+	Routes     []Route
+	GSOMaxSize uint32
 }
 
 // LoopbackLink configures a loopback li nk.
@@ -112,7 +113,7 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		linkEP := loopback.New()
 
 		log.Infof("Enabling loopback interface %q with id %d on addresses %+v", link.Name, nicID, link.Addresses)
-		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses); err != nil {
+		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses, true /* loopback */); err != nil {
 			return err
 		}
 
@@ -135,15 +136,16 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 
 		mac := tcpip.LinkAddress(generateRndMac())
 		linkEP := fdbased.New(&fdbased.Options{
-			FD:             newFD,
-			MTU:            uint32(link.MTU),
-			EthernetHeader: true,
-			HandleLocal:    true,
-			Address:        mac,
+			FD:                 newFD,
+			MTU:                uint32(link.MTU),
+			EthernetHeader:     true,
+			Address:            mac,
+			PacketDispatchMode: fdbased.PacketMMap,
+			GSOMaxSize:         link.GSOMaxSize,
 		})
 
 		log.Infof("Enabling interface %q with id %d on addresses %+v (%v)", link.Name, nicID, link.Addresses, mac)
-		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses); err != nil {
+		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses, false /* loopback */); err != nil {
 			return err
 		}
 
@@ -168,9 +170,15 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 
 // createNICWithAddrs creates a NIC in the network stack and adds the given
 // addresses.
-func (n *Network) createNICWithAddrs(id tcpip.NICID, name string, linkEP tcpip.LinkEndpointID, addrs []net.IP) error {
-	if err := n.Stack.CreateNamedNIC(id, name, sniffer.New(linkEP)); err != nil {
-		return fmt.Errorf("CreateNamedNIC(%v, %v, %v) failed: %v", id, name, linkEP, err)
+func (n *Network) createNICWithAddrs(id tcpip.NICID, name string, linkEP tcpip.LinkEndpointID, addrs []net.IP, loopback bool) error {
+	if loopback {
+		if err := n.Stack.CreateNamedLoopbackNIC(id, name, sniffer.New(linkEP)); err != nil {
+			return fmt.Errorf("CreateNamedLoopbackNIC(%v, %v, %v) failed: %v", id, name, linkEP, err)
+		}
+	} else {
+		if err := n.Stack.CreateNamedNIC(id, name, sniffer.New(linkEP)); err != nil {
+			return fmt.Errorf("CreateNamedNIC(%v, %v, %v) failed: %v", id, name, linkEP, err)
+		}
 	}
 
 	// Always start with an arp address for the NIC.

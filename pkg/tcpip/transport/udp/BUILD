@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -27,6 +27,7 @@ go_library(
     imports = ["gvisor.googlesource.com/gvisor/pkg/tcpip/buffer"],
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/log",
         "//pkg/sleep",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",

@@ -38,6 +38,9 @@ import (
 // changed in tests that aren't linked in the same binary.
 var ExePath = "/proc/self/exe"
 
+// Version is the supported spec version.
+var Version = specs.Version
+
 // LogSpec logs the spec in a human-friendly way.
 func LogSpec(spec *specs.Spec) {
 	log.Debugf("Spec: %+v", spec)
@@ -92,9 +95,14 @@ func ValidateSpec(spec *specs.Spec) error {
 		log.Warningf("Seccomp spec is being ignored")
 	}
 
-	for i, m := range spec.Mounts {
-		if !path.IsAbs(m.Destination) {
-			return fmt.Errorf("Spec.Mounts[%d] Mount.Destination must be an absolute path: %v", i, m)
+	if spec.Linux != nil && spec.Linux.RootfsPropagation != "" {
+		if err := validateRootfsPropagation(spec.Linux.RootfsPropagation); err != nil {
+			return err
+		}
+	}
+	for _, m := range spec.Mounts {
+		if err := validateMount(&m); err != nil {
+			return err
 		}
 	}
 
@@ -129,15 +137,19 @@ func absPath(base, rel string) string {
 	return filepath.Join(base, rel)
 }
 
+// OpenSpec opens an OCI runtime spec from the given bundle directory.
+func OpenSpec(bundleDir string) (*os.File, error) {
+	// The spec file must be named "config.json" inside the bundle directory.
+	return os.Open(filepath.Join(bundleDir, "config.json"))
+}
+
 // ReadSpec reads an OCI runtime spec from the given bundle directory.
 // ReadSpec also normalizes all potential relative paths into absolute
 // path, e.g. spec.Root.Path, mount.Source.
 func ReadSpec(bundleDir string) (*specs.Spec, error) {
-	// The spec file must be in "config.json" inside the bundle directory.
-	specPath := filepath.Join(bundleDir, "config.json")
-	specFile, err := os.Open(specPath)
+	specFile, err := OpenSpec(bundleDir)
 	if err != nil {
-		return nil, fmt.Errorf("error opening spec file %q: %v", specPath, err)
+		return nil, fmt.Errorf("error opening spec file %q: %v", specFile.Name(), err)
 	}
 	defer specFile.Close()
 	return ReadSpecFromFile(bundleDir, specFile)
@@ -171,27 +183,17 @@ func ReadSpecFromFile(bundleDir string, specFile *os.File) (*specs.Spec, error) 
 	return &spec, nil
 }
 
-// OpenCleanSpec opens spec file that has destination mount paths resolved to
-// their absolute location.
-func OpenCleanSpec(bundleDir string) (*os.File, error) {
-	f, err := os.Open(filepath.Join(bundleDir, "config.clean.json"))
+// ReadMounts reads mount list from a file.
+func ReadMounts(f *os.File) ([]specs.Mount, error) {
+	bytes, err := ioutil.ReadAll(f)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading mounts: %v", err)
 	}
-	if _, err := f.Seek(0, os.SEEK_SET); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("error seeking to beginning of file %q: %v", f.Name(), err)
+	var mounts []specs.Mount
+	if err := json.Unmarshal(bytes, &mounts); err != nil {
+		return nil, fmt.Errorf("error unmarshaling mounts: %v\n %s", err, string(bytes))
 	}
-	return f, nil
-}
-
-// WriteCleanSpec writes a spec file that has destination mount paths resolved.
-func WriteCleanSpec(bundleDir string, spec *specs.Spec) error {
-	bytes, err := json.Marshal(spec)
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(filepath.Join(bundleDir, "config.clean.json"), bytes, 0755)
+	return mounts, nil
 }
 
 // Capabilities takes in spec and returns a TaskCapabilities corresponding to
@@ -315,16 +317,6 @@ func IsSupportedDevMount(m specs.Mount) bool {
 	return true
 }
 
-// BinPath returns the real path to self, resolving symbolink links. This is done
-// to make the process name appears as 'runsc', instead of 'exe'.
-func BinPath() (string, error) {
-	binPath, err := filepath.EvalSymlinks(ExePath)
-	if err != nil {
-		return "", fmt.Errorf(`error resolving %q symlink: %v`, ExePath, err)
-	}
-	return binPath, nil
-}
-
 const (
 	// ContainerdContainerTypeAnnotation is the OCI annotation set by
 	// containerd to indicate whether the container to create should have
@@ -417,8 +409,7 @@ func Mount(src, dst, typ string, flags uint32) error {
 	// source (file or directory).
 	var isDir bool
 	if typ == "proc" {
-		// Special case, as there is no source directory for proc
-		// mounts.
+		// Special case, as there is no source directory for proc mounts.
 		isDir = true
 	} else if fi, err := os.Stat(src); err != nil {
 		return fmt.Errorf("Stat(%q) failed: %v", src, err)

@@ -20,7 +20,6 @@ import (
 	"io"
 
 	"gvisor.googlesource.com/gvisor/pkg/abi"
-	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
@@ -29,7 +28,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/mm"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/uniqueid"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
@@ -37,20 +36,6 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 	"gvisor.googlesource.com/gvisor/pkg/waiter"
 )
-
-// byteReaderFileOperations implements fs.FileOperations for reading
-// from a []byte source.
-type byteReader struct {
-	fsutil.NoopRelease
-	fsutil.PipeSeek
-	fsutil.NotDirReaddir
-	fsutil.NoFsync
-	fsutil.NoopFlush
-	fsutil.NoMMap
-	fsutil.NoIoctl
-	waiter.AlwaysReady
-	data []byte
-}
 
 type fileContext struct {
 	context.Context
@@ -65,17 +50,34 @@ func (f *fileContext) Value(key interface{}) interface{} {
 	}
 }
 
+// byteReader implements fs.FileOperations for reading from a []byte source.
+type byteReader struct {
+	waiter.AlwaysReady       `state:"nosave"`
+	fsutil.FileNoFsync       `state:"nosave"`
+	fsutil.FileNoIoctl       `state:"nosave"`
+	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FileNoopFlush     `state:"nosave"`
+	fsutil.FileNoopRelease   `state:"nosave"`
+	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FilePipeSeek      `state:"nosave"`
+
+	data []byte
+}
+
+var _ fs.FileOperations = (*byteReader)(nil)
+
 // newByteReaderFile creates a fake file to read data from.
 func newByteReaderFile(data []byte) *fs.File {
 	// Create a fake inode.
-	inode := fs.NewInode(fsutil.NewSimpleInodeOperations(fsutil.InodeSimpleAttributes{
-		FSType: linux.ANON_INODE_FS_MAGIC,
-	}), fs.NewNonCachingMountSource(nil, fs.MountSourceFlags{}), fs.StableAttr{
-		Type:      fs.Anonymous,
-		DeviceID:  anon.PseudoDevice.DeviceID(),
-		InodeID:   anon.PseudoDevice.NextIno(),
-		BlockSize: usermem.PageSize,
-	})
+	inode := fs.NewInode(
+		&fsutil.SimpleFileInode{},
+		fs.NewPseudoMountSource(),
+		fs.StableAttr{
+			Type:      fs.Anonymous,
+			DeviceID:  anon.PseudoDevice.DeviceID(),
+			InodeID:   anon.PseudoDevice.NextIno(),
+			BlockSize: usermem.PageSize,
+		})
 
 	// Use the fake inode to create a fake dirent.
 	dirent := fs.NewTransientDirent(inode)
@@ -215,7 +217,7 @@ type VDSO struct {
 
 // PrepareVDSO validates the system VDSO and returns a VDSO, containing the
 // param page for updating by the kernel.
-func PrepareVDSO(p platform.Platform) (*VDSO, error) {
+func PrepareVDSO(mfp pgalloc.MemoryFileProvider) (*VDSO, error) {
 	vdsoFile := newByteReaderFile(vdsoBin)
 
 	// First make sure the VDSO is valid. vdsoFile does not use ctx, so a
@@ -232,35 +234,36 @@ func PrepareVDSO(p platform.Platform) (*VDSO, error) {
 		return nil, fmt.Errorf("VDSO size overflows? %#x", len(vdsoBin))
 	}
 
-	vdso, err := p.Memory().Allocate(uint64(size), usage.System)
+	mf := mfp.MemoryFile()
+	vdso, err := mf.Allocate(uint64(size), usage.System)
 	if err != nil {
 		return nil, fmt.Errorf("unable to allocate VDSO memory: %v", err)
 	}
 
-	ims, err := p.Memory().MapInternal(vdso, usermem.ReadWrite)
+	ims, err := mf.MapInternal(vdso, usermem.ReadWrite)
 	if err != nil {
-		p.Memory().DecRef(vdso)
+		mf.DecRef(vdso)
 		return nil, fmt.Errorf("unable to map VDSO memory: %v", err)
 	}
 
 	_, err = safemem.CopySeq(ims, safemem.BlockSeqOf(safemem.BlockFromSafeSlice(vdsoBin)))
 	if err != nil {
-		p.Memory().DecRef(vdso)
+		mf.DecRef(vdso)
 		return nil, fmt.Errorf("unable to copy VDSO into memory: %v", err)
 	}
 
 	// Finally, allocate a param page for this VDSO.
-	paramPage, err := p.Memory().Allocate(usermem.PageSize, usage.System)
+	paramPage, err := mf.Allocate(usermem.PageSize, usage.System)
 	if err != nil {
-		p.Memory().DecRef(vdso)
+		mf.DecRef(vdso)
 		return nil, fmt.Errorf("unable to allocate VDSO param page: %v", err)
 	}
 
 	return &VDSO{
-		ParamPage: mm.NewSpecialMappable("[vvar]", p, paramPage),
+		ParamPage: mm.NewSpecialMappable("[vvar]", mfp, paramPage),
 		// TODO: Don't advertise the VDSO, as some applications may
 		// not be able to handle multiple [vdso] hints.
-		vdso:  mm.NewSpecialMappable("", p, vdso),
+		vdso:  mm.NewSpecialMappable("", mfp, vdso),
 		phdrs: info.phdrs,
 	}, nil
 }

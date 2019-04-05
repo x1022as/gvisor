@@ -1,6 +1,6 @@
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "ipv6",
@@ -32,7 +32,7 @@ go_test(
         "//pkg/tcpip/link/channel",
         "//pkg/tcpip/link/sniffer",
         "//pkg/tcpip/stack",
-        "//pkg/tcpip/transport/ping",
+        "//pkg/tcpip/transport/icmp",
         "//pkg/waiter",
     ],
 )

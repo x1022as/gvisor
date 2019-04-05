@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -25,6 +25,7 @@ go_library(
         "bytes_io_unsafe.go",
         "usermem.go",
         "usermem_arm64.go",
+        "usermem_unsafe.go",
         "usermem_x86.go",
     ],
     importpath = "gvisor.googlesource.com/gvisor/pkg/sentry/usermem",

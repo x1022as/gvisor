@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -40,6 +41,7 @@ var (
 	logFilename = flag.String("log", "", "file path where internal debug information is written, default is stdout")
 	logFormat   = flag.String("log-format", "text", "log format: text (default), json, or json-k8s")
 	debug       = flag.Bool("debug", false, "enable debug logging")
+	showVersion = flag.Bool("version", false, "show version and exit")
 
 	// These flags are unique to runsc, and are used to configure parts of the
 	// system that are not covered by the runtime spec.
@@ -59,16 +61,15 @@ var (
 	// Flags that control sandbox runtime behavior.
 	platform       = flag.String("platform", "ptrace", "specifies which platform to use: ptrace (default), kvm")
 	network        = flag.String("network", "sandbox", "specifies which network to use: sandbox (default), host, none. Using network inside the sandbox is more secure because it's isolated from the host network.")
+	gso            = flag.Bool("gso", true, "enable generic segmenation offload")
 	fileAccess     = flag.String("file-access", "exclusive", "specifies which filesystem to use for the root mount: exclusive (default), shared. Volume mounts are always shared.")
 	overlay        = flag.Bool("overlay", false, "wrap filesystem mounts with writable overlay. All modifications are stored in memory inside the sandbox.")
 	watchdogAction = flag.String("watchdog-action", "log", "sets what action the watchdog takes when triggered: log (default), panic.")
 	panicSignal    = flag.Int("panic-signal", -1, "register signal handling that panics. Usually set to SIGUSR2(12) to troubleshoot hangs. -1 disables it.")
+	profile        = flag.Bool("profile", false, "prepares the sandbox to use Golang profiler. Note that enabling profiler loosens the seccomp protection added to the sandbox (DO NOT USE IN PRODUCTION).")
 
 	testOnlyAllowRunAsCurrentUserWithoutChroot = flag.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
 )
-
-// gitRevision is set during linking.
-var gitRevision = ""
 
 func main() {
 	// Help and flags commands are generated automatically.
@@ -105,6 +106,14 @@ func main() {
 	// All subcommands must be registered before flag parsing.
 	flag.Parse()
 
+	// Are we showing the version?
+	if *showVersion {
+		// The format here is the same as runc.
+		fmt.Fprintf(os.Stdout, "runsc version %s\n", version)
+		fmt.Fprintf(os.Stdout, "spec: %s\n", specutils.Version)
+		os.Exit(0)
+	}
+
 	platformType, err := boot.MakePlatformType(*platform)
 	if err != nil {
 		cmd.Fatalf("%v", err)
@@ -140,12 +149,14 @@ func main() {
 		FileAccess:     fsAccess,
 		Overlay:        *overlay,
 		Network:        netType,
+		GSO:            *gso,
 		LogPackets:     *logPackets,
 		Platform:       platformType,
 		Strace:         *strace,
 		StraceLogSize:  *straceLogSize,
 		WatchdogAction: wa,
 		PanicSignal:    *panicSignal,
+		ProfileEnable:  *profile,
 		TestOnlyAllowRunAsCurrentUserWithoutChroot: *testOnlyAllowRunAsCurrentUserWithoutChroot,
 	}
 	if len(*straceSyscalls) != 0 {
@@ -179,8 +190,8 @@ func main() {
 
 		// Quick sanity check to make sure no other commands get passed
 		// a log fd (they should use log dir instead).
-		if subcommand != "boot" {
-			cmd.Fatalf("flag --debug-log-fd should only be passed to 'boot' command, but was passed to %q", subcommand)
+		if subcommand != "boot" && subcommand != "gofer" {
+			cmd.Fatalf("flag --debug-log-fd should only be passed to 'boot' and 'gofer' command, but was passed to %q", subcommand)
 		}
 
 		// If we are the boot process, then we own our stdio FDs and
@@ -192,7 +203,13 @@ func main() {
 			cmd.Fatalf("error dup'ing fd %d to stderr: %v", f.Fd(), err)
 		}
 
-		e = log.MultiEmitter{e, newEmitter(*debugLogFormat, f)}
+		if logFile == os.Stderr {
+			// Suppress logging to stderr when debug log is enabled. Otherwise all
+			// messages will be duplicated in the debug log (see Dup2() call above).
+			e = newEmitter(*debugLogFormat, f)
+		} else {
+			e = log.MultiEmitter{e, newEmitter(*debugLogFormat, f)}
+		}
 	} else if *debugLog != "" {
 		f, err := specutils.DebugLogFile(*debugLog, subcommand)
 		if err != nil {
@@ -205,7 +222,7 @@ func main() {
 
 	log.Infof("***************************")
 	log.Infof("Args: %s", os.Args)
-	log.Infof("Git Revision: %s", gitRevision)
+	log.Infof("Version %s", version)
 	log.Infof("PID: %d", os.Getpid())
 	log.Infof("UID: %d, GID: %d", os.Getuid(), os.Getgid())
 	log.Infof("Configuration:")

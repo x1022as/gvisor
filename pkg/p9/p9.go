@@ -41,6 +41,10 @@ const (
 
 	// OpenFlagsModeMask is a mask of valid OpenFlags mode bits.
 	OpenFlagsModeMask OpenFlags = 3
+
+	// OpenFlagsIgnoreMask is a list of OpenFlags mode bits that are ignored for Tlopen.
+	// Note that syscall.O_LARGEFILE is set to zero, use value from Linux fcntl.h.
+	OpenFlagsIgnoreMask OpenFlags = syscall.O_DIRECTORY | syscall.O_NOATIME | 0100000
 )
 
 // ConnectFlags is the mode passed to Connect operations.
@@ -79,6 +83,8 @@ func (o OpenFlags) String() string {
 		return "ReadWrite"
 	case OpenFlagsModeMask:
 		return "OpenFlagsModeMask"
+	case OpenFlagsIgnoreMask:
+		return "OpenFlagsIgnoreMask"
 	default:
 		return "UNDEFINED"
 	}
@@ -130,8 +136,15 @@ const (
 	// Exec is a mode bit indicating exec permission.
 	Exec FileMode = 01
 
-	// PermissionsMask is the mask to apply to FileModes for permissions.
-	PermissionsMask FileMode = 0777
+	// AllPermissions is a mask with rwx bits set for user, group and others.
+	AllPermissions FileMode = 0777
+
+	// Sticky is a mode bit indicating sticky directories.
+	Sticky FileMode = 01000
+
+	// permissionsMask is the mask to apply to FileModes for permissions. It
+	// includes rwx bits for user, group and others, and sticky bit.
+	permissionsMask FileMode = 01777
 )
 
 // QIDType is the most significant byte of the FileMode word, to be used as the
@@ -157,7 +170,7 @@ func (m FileMode) FileType() FileMode {
 
 // Permissions returns just the permission bits of the mode.
 func (m FileMode) Permissions() FileMode {
-	return m & PermissionsMask
+	return m & permissionsMask
 }
 
 // Writable returns the mode with write bits added.
@@ -987,7 +1000,7 @@ func (s *SetAttr) Encode(b *buffer) {
 // Apply applies this to the given Attr.
 func (a *Attr) Apply(mask SetAttrMask, attr SetAttr) {
 	if mask.Permissions {
-		a.Mode = a.Mode&^PermissionsMask | (attr.Permissions & PermissionsMask)
+		a.Mode = a.Mode&^permissionsMask | (attr.Permissions & permissionsMask)
 	}
 	if mask.UID {
 		a.UID = attr.UID

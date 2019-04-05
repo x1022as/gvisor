@@ -77,6 +77,15 @@ func TestSACKScoreboardIsSACKED(t *testing.T) {
 			},
 			4294254144,
 		},
+		{
+			"Test disjoint SACKBlocks out of order",
+			[]header.SACKBlock{{827450276, 827454536}, {827426028, 827428868}},
+			[]blockTest{
+				{header.SACKBlock{827426028, 827428867}, true},
+				{header.SACKBlock{827450168, 827450275}, false},
+			},
+			827426000,
+		},
 	}
 	for _, tc := range testCases {
 		sb := initScoreboard(tc.scoreboardBlocks, tc.iss)
@@ -94,20 +103,21 @@ func TestSACKScoreboardIsLost(t *testing.T) {
 	s.Insert(header.SACKBlock{51, 100})
 	s.Insert(header.SACKBlock{111, 120})
 	s.Insert(header.SACKBlock{101, 110})
-	s.Insert(header.SACKBlock{121, 151})
+	s.Insert(header.SACKBlock{121, 141})
 	testCases := []struct {
 		block header.SACKBlock
 		lost  bool
 	}{
-		{header.SACKBlock{0, 1}, true},
-		{header.SACKBlock{1, 2}, false},
-		{header.SACKBlock{1, 45}, false},
-		{header.SACKBlock{50, 51}, true},
-		// This one should return true because there are > 3* 10 (smss)
-		// bytes that have been sacked above this sequence number.
-		{header.SACKBlock{119, 120}, true},
-		{header.SACKBlock{120, 121}, true},
-		{header.SACKBlock{125, 126}, false},
+		{block: header.SACKBlock{0, 1}, lost: true},
+		{block: header.SACKBlock{1, 2}, lost: false},
+		{block: header.SACKBlock{1, 45}, lost: false},
+		{block: header.SACKBlock{50, 51}, lost: true},
+		// This one should return true because there are
+		// > (nDupAckThreshold - 1) * 10 (smss) bytes that have been sacked above
+		// this sequence number.
+		{block: header.SACKBlock{119, 120}, lost: true},
+		{block: header.SACKBlock{120, 121}, lost: true},
+		{block: header.SACKBlock{125, 126}, lost: false},
 	}
 	for _, tc := range testCases {
 		if want, got := tc.lost, s.IsLost(tc.block); got != want {

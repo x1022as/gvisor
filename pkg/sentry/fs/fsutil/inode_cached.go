@@ -22,8 +22,10 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	ktime "gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
@@ -61,8 +63,8 @@ type CachingInodeOperations struct {
 	// backingFile is a handle to a cached file object.
 	backingFile CachedFileObject
 
-	// platform is used to allocate memory that caches backingFile's contents.
-	platform platform.Platform
+	// mfp is used to allocate memory that caches backingFile's contents.
+	mfp pgalloc.MemoryFileProvider
 
 	// forcePageCache indicates the sentry page cache should be used regardless
 	// of whether the platform supports host mapped I/O or not. This must not be
@@ -95,7 +97,7 @@ type CachingInodeOperations struct {
 	dataMu sync.RWMutex `state:"nosave"`
 
 	// cache maps offsets into the cached file to offsets into
-	// platform.Memory() that store the file's data.
+	// mfp.MemoryFile() that store the file's data.
 	//
 	// cache is protected by dataMu.
 	cache FileRangeSet
@@ -136,28 +138,31 @@ type CachedFileObject interface {
 	// Sync instructs the remote filesystem to sync the file to stable storage.
 	Sync(ctx context.Context) error
 
-	// FD returns a host file descriptor. Return value must be -1 or not -1
-	// for the lifetime of the CachedFileObject.
+	// FD returns a host file descriptor. If it is possible for
+	// CachingInodeOperations.AddMapping to have ever been called with writable
+	// = true, the FD must have been opened O_RDWR; otherwise, it may have been
+	// opened O_RDONLY or O_RDWR. (mmap unconditionally requires that mapped
+	// files are readable.) If no host file descriptor is available, FD returns
+	// a negative number.
+	//
+	// For any given CachedFileObject, if FD() ever succeeds (returns a
+	// non-negative number), it must always succeed.
 	//
 	// FD is called iff the file has been memory mapped. This implies that
 	// the file was opened (see fs.InodeOperations.GetFile).
-	//
-	// FIXME: This interface seems to be
-	// fundamentally broken.  We should clarify CachingInodeOperation's
-	// behavior with metadata.
 	FD() int
 }
 
 // NewCachingInodeOperations returns a new CachingInodeOperations backed by
 // a CachedFileObject and its initial unstable attributes.
 func NewCachingInodeOperations(ctx context.Context, backingFile CachedFileObject, uattr fs.UnstableAttr, forcePageCache bool) *CachingInodeOperations {
-	p := platform.FromContext(ctx)
-	if p == nil {
-		panic(fmt.Sprintf("context.Context %T lacks non-nil value for key %T", ctx, platform.CtxPlatform))
+	mfp := pgalloc.MemoryFileProviderFromContext(ctx)
+	if mfp == nil {
+		panic(fmt.Sprintf("context.Context %T lacks non-nil value for key %T", ctx, pgalloc.CtxMemoryFileProvider))
 	}
 	return &CachingInodeOperations{
 		backingFile:    backingFile,
-		platform:       p,
+		mfp:            mfp,
 		forcePageCache: forcePageCache,
 		attr:           uattr,
 		hostFileMapper: NewHostFileMapper(),
@@ -190,16 +195,14 @@ func (c *CachingInodeOperations) SetPermissions(ctx context.Context, inode *fs.I
 	c.attrMu.Lock()
 	defer c.attrMu.Unlock()
 
+	now := ktime.NowFromContext(ctx)
 	masked := fs.AttrMask{Perms: true}
 	if err := c.backingFile.SetMaskedAttributes(ctx, masked, fs.UnstableAttr{Perms: perms}); err != nil {
 		return false
 	}
 	c.attr.Perms = perms
-	// FIXME: Clarify CachingInodeOperations behavior with metadata.
-	c.dirtyAttr.Perms = true
-	c.touchStatusChangeTimeLocked(ctx)
+	c.touchStatusChangeTimeLocked(now)
 	return true
-
 }
 
 // SetOwner implements fs.InodeOperations.SetOwner.
@@ -211,6 +214,7 @@ func (c *CachingInodeOperations) SetOwner(ctx context.Context, inode *fs.Inode, 
 	c.attrMu.Lock()
 	defer c.attrMu.Unlock()
 
+	now := ktime.NowFromContext(ctx)
 	masked := fs.AttrMask{
 		UID: owner.UID.Ok(),
 		GID: owner.GID.Ok(),
@@ -220,15 +224,11 @@ func (c *CachingInodeOperations) SetOwner(ctx context.Context, inode *fs.Inode, 
 	}
 	if owner.UID.Ok() {
 		c.attr.Owner.UID = owner.UID
-		// FIXME: Clarify CachingInodeOperations behavior with metadata.
-		c.dirtyAttr.UID = true
 	}
 	if owner.GID.Ok() {
 		c.attr.Owner.GID = owner.GID
-		// FIXME: Clarify CachingInodeOperations behavior with metadata.
-		c.dirtyAttr.GID = true
 	}
-	c.touchStatusChangeTimeLocked(ctx)
+	c.touchStatusChangeTimeLocked(now)
 	return nil
 }
 
@@ -260,15 +260,11 @@ func (c *CachingInodeOperations) SetTimestamps(ctx context.Context, inode *fs.In
 	}
 	if !ts.ATimeOmit {
 		c.attr.AccessTime = ts.ATime
-		// FIXME: Clarify CachingInodeOperations behavior with metadata.
-		c.dirtyAttr.AccessTime = true
 	}
 	if !ts.MTimeOmit {
 		c.attr.ModificationTime = ts.MTime
-		// FIXME: Clarify CachingInodeOperations behavior with metadata.
-		c.dirtyAttr.ModificationTime = true
 	}
-	c.touchStatusChangeTimeLocked(ctx)
+	c.touchStatusChangeTimeLocked(now)
 	return nil
 }
 
@@ -279,21 +275,17 @@ func (c *CachingInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, 
 
 	// c.attr.Size is protected by both c.attrMu and c.dataMu.
 	c.dataMu.Lock()
-	if err := c.backingFile.SetMaskedAttributes(ctx, fs.AttrMask{
-		Size: true,
-	}, fs.UnstableAttr{
-		Size: size,
-	}); err != nil {
+	now := ktime.NowFromContext(ctx)
+	masked := fs.AttrMask{Size: true}
+	attr := fs.UnstableAttr{Size: size}
+	if err := c.backingFile.SetMaskedAttributes(ctx, masked, attr); err != nil {
 		c.dataMu.Unlock()
 		return err
 	}
 	oldSize := c.attr.Size
-	if oldSize != size {
-		c.attr.Size = size
-		// FIXME: Clarify CachingInodeOperations behavior with metadata.
-		c.dirtyAttr.Size = true
-		c.touchModificationTimeLocked(ctx)
-	}
+	c.attr.Size = size
+	c.touchModificationTimeLocked(now)
+
 	// We drop c.dataMu here so that we can lock c.mapsMu and invalidate
 	// mappings below. This allows concurrent calls to Read/Translate/etc.
 	// These functions synchronize with an in-progress Truncate by refusing to
@@ -327,7 +319,7 @@ func (c *CachingInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, 
 	// written back.
 	c.dataMu.Lock()
 	defer c.dataMu.Unlock()
-	c.cache.Truncate(uint64(size), c.platform.Memory())
+	c.cache.Truncate(uint64(size), c.mfp.MemoryFile())
 	c.dirty.KeepClean(memmap.MappableRange{uint64(size), oldpgend})
 
 	return nil
@@ -338,13 +330,17 @@ func (c *CachingInodeOperations) WriteOut(ctx context.Context, inode *fs.Inode) 
 	c.attrMu.Lock()
 
 	// Write dirty pages back.
-	c.dataMu.RLock()
-	err := SyncDirtyAll(ctx, &c.cache, &c.dirty, uint64(c.attr.Size), c.platform.Memory(), c.backingFile.WriteFromBlocksAt)
-	c.dataMu.RUnlock()
+	c.dataMu.Lock()
+	err := SyncDirtyAll(ctx, &c.cache, &c.dirty, uint64(c.attr.Size), c.mfp.MemoryFile(), c.backingFile.WriteFromBlocksAt)
+	c.dataMu.Unlock()
 	if err != nil {
 		c.attrMu.Unlock()
 		return err
 	}
+
+	// SyncDirtyAll above would have grown if needed. On shrinks, the backing
+	// file is called directly, so size is never needs to be updated.
+	c.dirtyAttr.Size = false
 
 	// Write out cached attributes.
 	if err := c.backingFile.SetMaskedAttributes(ctx, c.dirtyAttr, c.attr); err != nil {
@@ -363,7 +359,7 @@ func (c *CachingInodeOperations) WriteOut(ctx context.Context, inode *fs.Inode) 
 func (c *CachingInodeOperations) IncLinks(ctx context.Context) {
 	c.attrMu.Lock()
 	c.attr.Links++
-	c.touchModificationTimeLocked(ctx)
+	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
@@ -371,7 +367,7 @@ func (c *CachingInodeOperations) IncLinks(ctx context.Context) {
 func (c *CachingInodeOperations) DecLinks(ctx context.Context) {
 	c.attrMu.Lock()
 	c.attr.Links--
-	c.touchModificationTimeLocked(ctx)
+	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
@@ -384,7 +380,7 @@ func (c *CachingInodeOperations) TouchAccessTime(ctx context.Context, inode *fs.
 	}
 
 	c.attrMu.Lock()
-	c.touchAccessTimeLocked(ctx)
+	c.touchAccessTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
@@ -392,8 +388,8 @@ func (c *CachingInodeOperations) TouchAccessTime(ctx context.Context, inode *fs.
 // time.
 //
 // Preconditions: c.attrMu is locked for writing.
-func (c *CachingInodeOperations) touchAccessTimeLocked(ctx context.Context) {
-	c.attr.AccessTime = ktime.NowFromContext(ctx)
+func (c *CachingInodeOperations) touchAccessTimeLocked(now time.Time) {
+	c.attr.AccessTime = now
 	c.dirtyAttr.AccessTime = true
 }
 
@@ -401,7 +397,7 @@ func (c *CachingInodeOperations) touchAccessTimeLocked(ctx context.Context) {
 // in-place to the current time.
 func (c *CachingInodeOperations) TouchModificationTime(ctx context.Context) {
 	c.attrMu.Lock()
-	c.touchModificationTimeLocked(ctx)
+	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
@@ -409,8 +405,7 @@ func (c *CachingInodeOperations) TouchModificationTime(ctx context.Context) {
 // change time in-place to the current time.
 //
 // Preconditions: c.attrMu is locked for writing.
-func (c *CachingInodeOperations) touchModificationTimeLocked(ctx context.Context) {
-	now := ktime.NowFromContext(ctx)
+func (c *CachingInodeOperations) touchModificationTimeLocked(now time.Time) {
 	c.attr.ModificationTime = now
 	c.dirtyAttr.ModificationTime = true
 	c.attr.StatusChangeTime = now
@@ -421,8 +416,7 @@ func (c *CachingInodeOperations) touchModificationTimeLocked(ctx context.Context
 // in-place to the current time.
 //
 // Preconditions: c.attrMu is locked for writing.
-func (c *CachingInodeOperations) touchStatusChangeTimeLocked(ctx context.Context) {
-	now := ktime.NowFromContext(ctx)
+func (c *CachingInodeOperations) touchStatusChangeTimeLocked(now time.Time) {
 	c.attr.StatusChangeTime = now
 	c.dirtyAttr.StatusChangeTime = true
 }
@@ -513,7 +507,7 @@ func (c *CachingInodeOperations) Write(ctx context.Context, src usermem.IOSequen
 
 	c.attrMu.Lock()
 	// Compare Linux's mm/filemap.c:__generic_file_write_iter() => file_update_time().
-	c.touchModificationTimeLocked(ctx)
+	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
 	n, err := src.CopyInTo(ctx, &inodeReadWriter{ctx, c, offset})
 	c.attrMu.Unlock()
 	return n, err
@@ -541,7 +535,7 @@ func (rw *inodeReadWriter) ReadToBlocks(dsts safemem.BlockSeq) (uint64, error) {
 		return 0, nil
 	}
 
-	mem := rw.c.platform.Memory()
+	mem := rw.c.mfp.MemoryFile()
 	var done uint64
 	seg, gap := rw.c.cache.Find(uint64(rw.offset))
 	for rw.offset < end {
@@ -627,7 +621,7 @@ func (rw *inodeReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error
 		return 0, nil
 	}
 
-	mem := rw.c.platform.Memory()
+	mf := rw.c.mfp.MemoryFile()
 	var done uint64
 	seg, gap := rw.c.cache.Find(uint64(rw.offset))
 	for rw.offset < end {
@@ -636,7 +630,7 @@ func (rw *inodeReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error
 		case seg.Ok() && seg.Start() < mr.End:
 			// Get internal mappings from the cache.
 			segMR := seg.Range().Intersect(mr)
-			ims, err := mem.MapInternal(seg.FileRangeOf(segMR), usermem.Write)
+			ims, err := mf.MapInternal(seg.FileRangeOf(segMR), usermem.Write)
 			if err != nil {
 				rw.maybeGrowFile()
 				rw.c.dataMu.Unlock()
@@ -725,13 +719,13 @@ func (c *CachingInodeOperations) RemoveMapping(ctx context.Context, ms memmap.Ma
 	// Writeback dirty mapped memory now that there are no longer any
 	// mappings that reference it. This is our naive memory eviction
 	// strategy.
-	mem := c.platform.Memory()
+	mf := c.mfp.MemoryFile()
 	c.dataMu.Lock()
 	for _, r := range unmapped {
-		if err := SyncDirty(ctx, r, &c.cache, &c.dirty, uint64(c.attr.Size), c.platform.Memory(), c.backingFile.WriteFromBlocksAt); err != nil {
+		if err := SyncDirty(ctx, r, &c.cache, &c.dirty, uint64(c.attr.Size), mf, c.backingFile.WriteFromBlocksAt); err != nil {
 			log.Warningf("Failed to writeback cached data %v: %v", r, err)
 		}
-		c.cache.Drop(r, mem)
+		c.cache.Drop(r, mf)
 		c.dirty.KeepClean(r)
 	}
 	c.dataMu.Unlock()
@@ -752,6 +746,7 @@ func (c *CachingInodeOperations) Translate(ctx context.Context, required, option
 				Source: optional,
 				File:   c,
 				Offset: optional.Start,
+				Perms:  usermem.AnyAccess,
 			},
 		}, nil
 	}
@@ -774,23 +769,31 @@ func (c *CachingInodeOperations) Translate(ctx context.Context, required, option
 		optional.End = pgend
 	}
 
-	mem := c.platform.Memory()
-	cerr := c.cache.Fill(ctx, required, maxFillRange(required, optional), mem, usage.PageCache, c.backingFile.ReadToBlocksAt)
+	mf := c.mfp.MemoryFile()
+	cerr := c.cache.Fill(ctx, required, maxFillRange(required, optional), mf, usage.PageCache, c.backingFile.ReadToBlocksAt)
 
 	var ts []memmap.Translation
 	var translatedEnd uint64
 	for seg := c.cache.FindSegment(required.Start); seg.Ok() && seg.Start() < required.End; seg, _ = seg.NextNonEmpty() {
 		segMR := seg.Range().Intersect(optional)
-		ts = append(ts, memmap.Translation{
-			Source: segMR,
-			File:   mem,
-			Offset: seg.FileRangeOf(segMR).Start,
-		})
+		// TODO: Make Translations writable even if writability is
+		// not required if already kept-dirty by another writable translation.
+		perms := usermem.AccessType{
+			Read:    true,
+			Execute: true,
+		}
 		if at.Write {
 			// From this point forward, this memory can be dirtied through the
 			// mapping at any time.
 			c.dirty.KeepDirty(segMR)
+			perms.Write = true
 		}
+		ts = append(ts, memmap.Translation{
+			Source: segMR,
+			File:   mf,
+			Offset: seg.FileRangeOf(segMR).Start,
+			Perms:  perms,
+		})
 		translatedEnd = segMR.End
 	}
 
@@ -834,33 +837,20 @@ func (c *CachingInodeOperations) InvalidateUnsavable(ctx context.Context) error 
 
 	// Sync the cache's contents so that if we have a host fd after restore,
 	// the remote file's contents are coherent.
+	mf := c.mfp.MemoryFile()
 	c.dataMu.Lock()
 	defer c.dataMu.Unlock()
-	if err := SyncDirtyAll(ctx, &c.cache, &c.dirty, uint64(c.attr.Size), c.platform.Memory(), c.backingFile.WriteFromBlocksAt); err != nil {
+	if err := SyncDirtyAll(ctx, &c.cache, &c.dirty, uint64(c.attr.Size), mf, c.backingFile.WriteFromBlocksAt); err != nil {
 		return err
 	}
 
 	// Discard the cache so that it's not stored in saved state. This is safe
 	// because per InvalidateUnsavable invariants, no new translations can have
 	// been returned after we invalidated all existing translations above.
-	c.cache.DropAll(c.platform.Memory())
+	c.cache.DropAll(mf)
 	c.dirty.RemoveAll()
 
 	return nil
-}
-
-// MapInto implements platform.File.MapInto. This is used when we directly map
-// an underlying host fd and CachingInodeOperations is used as the platform.File
-// during translation.
-func (c *CachingInodeOperations) MapInto(as platform.AddressSpace, addr usermem.Addr, fr platform.FileRange, at usermem.AccessType, precommit bool) error {
-	return as.MapFile(addr, c.backingFile.FD(), fr, at, precommit)
-}
-
-// MapInternal implements platform.File.MapInternal. This is used when we
-// directly map an underlying host fd and CachingInodeOperations is used as the
-// platform.File during translation.
-func (c *CachingInodeOperations) MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
-	return c.hostFileMapper.MapInternal(fr, c.backingFile.FD(), at.Write)
 }
 
 // IncRef implements platform.File.IncRef. This is used when we directly map an
@@ -913,4 +903,18 @@ func (c *CachingInodeOperations) DecRef(fr platform.FileRange) {
 	c.refs.MergeAdjacent(fr)
 	c.dataMu.Unlock()
 
+}
+
+// MapInternal implements platform.File.MapInternal. This is used when we
+// directly map an underlying host fd and CachingInodeOperations is used as the
+// platform.File during translation.
+func (c *CachingInodeOperations) MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
+	return c.hostFileMapper.MapInternal(fr, c.backingFile.FD(), at.Write)
+}
+
+// FD implements platform.File.FD. This is used when we directly map an
+// underlying host fd and CachingInodeOperations is used as the platform.File
+// during translation.
+func (c *CachingInodeOperations) FD() int {
+	return c.backingFile.FD()
 }

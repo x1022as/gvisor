@@ -60,6 +60,9 @@ type Boot struct {
 	// to the process.
 	applyCaps bool
 
+	// setUpChroot is set to true if the sandbox is started in an empty root.
+	setUpRoot bool
+
 	// cpuNum number of CPUs to create inside the sandbox.
 	cpuNum int
 
@@ -72,6 +75,14 @@ type Boot struct {
 
 	// startSyncFD is the file descriptor to synchronize runsc and sandbox.
 	startSyncFD int
+
+	// mountsFD is the file descriptor to read list of mounts after they have
+	// been resolved (direct paths, no symlinks). They are resolved outside the
+	// sandbox (e.g. gofer) and sent through this FD.
+	mountsFD int
+
+	// pidns is set if the sanadbox is in its own pid namespace.
+	pidns bool
 }
 
 // Name implements subcommands.Command.Name.
@@ -99,10 +110,13 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.Var(&b.stdioFDs, "stdio-fds", "list of FDs containing sandbox stdin, stdout, and stderr in that order")
 	f.BoolVar(&b.console, "console", false, "set to true if the sandbox should allow terminal ioctl(2) syscalls")
 	f.BoolVar(&b.applyCaps, "apply-caps", false, "if true, apply capabilities defined in the spec to the process")
+	f.BoolVar(&b.setUpRoot, "setup-root", false, "if true, set up an empty root for the process")
+	f.BoolVar(&b.pidns, "pidns", false, "if true, the sandbox is in its own PID namespace")
 	f.IntVar(&b.cpuNum, "cpu-num", 0, "number of CPUs to create inside the sandbox")
 	f.Uint64Var(&b.totalMem, "total-memory", 0, "sets the initial amount of total memory to report back to the container")
 	f.IntVar(&b.userLogFD, "user-log-fd", 0, "file descriptor to write user logs to. 0 means no logging.")
 	f.IntVar(&b.startSyncFD, "start-sync-fd", -1, "required FD to used to synchronize sandbox startup")
+	f.IntVar(&b.mountsFD, "mounts-fd", -1, "mountsFD is the file descriptor to read list of mounts after they have been resolved (direct paths, no symlinks).")
 }
 
 // Execute implements subcommands.Command.Execute.  It starts a sandbox in a
@@ -116,12 +130,36 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 	// Ensure that if there is a panic, all goroutine stacks are printed.
 	debug.SetTraceback("all")
 
+	if b.setUpRoot {
+		if err := setUpChroot(b.pidns); err != nil {
+			Fatalf("error setting up chroot: %v", err)
+		}
+
+		if !b.applyCaps {
+			// Remove --setup-root arg to call myself.
+			var args []string
+			for _, arg := range os.Args {
+				if !strings.Contains(arg, "setup-root") {
+					args = append(args, arg)
+				}
+			}
+			// Note that we've already read the spec from the spec FD, and
+			// we will read it again after the exec call. This works
+			// because the ReadSpecFromFile function seeks to the beginning
+			// of the file before reading.
+			if err := callSelfAsNobody(args); err != nil {
+				Fatalf("%v", err)
+			}
+			panic("callSelfAsNobody must never return success")
+		}
+	}
+
 	// Get the spec from the specFD.
 	specFile := os.NewFile(uintptr(b.specFD), "spec file")
 	defer specFile.Close()
 	spec, err := specutils.ReadSpecFromFile(b.bundleDir, specFile)
 	if err != nil {
-		Fatalf("error reading spec: %v", err)
+		Fatalf("reading spec: %v", err)
 	}
 	specutils.LogSpec(spec)
 
@@ -144,7 +182,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 		// Remove --apply-caps arg to call myself.
 		var args []string
 		for _, arg := range os.Args {
-			if !strings.Contains(arg, "apply-caps") {
+			if !strings.Contains(arg, "setup-root") && !strings.Contains(arg, "apply-caps") {
 				args = append(args, arg)
 			}
 		}
@@ -158,6 +196,16 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 		}
 		panic("setCapsAndCallSelf must never return success")
 	}
+
+	// Read resolved mount list and replace the original one from the spec.
+	mountsFile := os.NewFile(uintptr(b.mountsFD), "mounts file")
+	cleanMounts, err := specutils.ReadMounts(mountsFile)
+	if err != nil {
+		mountsFile.Close()
+		Fatalf("Error reading mounts file: %v", err)
+	}
+	mountsFile.Close()
+	spec.Mounts = cleanMounts
 
 	// Create the loader.
 	bootArgs := boot.Args{
@@ -175,7 +223,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 	}
 	l, err := boot.New(bootArgs)
 	if err != nil {
-		Fatalf("error creating loader: %v", err)
+		Fatalf("creating loader: %v", err)
 	}
 
 	// Fatalf exits the process and doesn't run defers.
@@ -187,7 +235,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 	buf := make([]byte, 1)
 	if w, err := startSyncFile.Write(buf); err != nil || w != 1 {
 		l.Destroy()
-		Fatalf("Unable to write into the start-sync descriptor: %v", err)
+		Fatalf("unable to write into the start-sync descriptor: %v", err)
 	}
 	// Closes startSyncFile because 'l.Run()' only returns when the sandbox exits.
 	startSyncFile.Close()
@@ -198,7 +246,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 	// Run the application and wait for it to finish.
 	if err := l.Run(); err != nil {
 		l.Destroy()
-		Fatalf("error running sandbox: %v", err)
+		Fatalf("running sandbox: %v", err)
 	}
 
 	ws := l.WaitExit()

@@ -45,13 +45,14 @@ import (
 // socketOperations implements fs.FileOperations and socket.Socket for a socket
 // implemented using a host socket.
 type socketOperations struct {
-	fsutil.PipeSeek      `state:"nosave"`
-	fsutil.NotDirReaddir `state:"nosave"`
-	fsutil.NoFsync       `state:"nosave"`
-	fsutil.NoopFlush     `state:"nosave"`
-	fsutil.NoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek      `state:"nosave"`
+	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileNoFsync       `state:"nosave"`
+	fsutil.FileNoopFlush     `state:"nosave"`
+	fsutil.FileNoMMap        `state:"nosave"`
 	socket.SendReceiveTimeout
 
+	family   int    // Read-only.
 	fd       uint32 // must be O_NONBLOCK
 	wq       *waiter.Queue
 	rpcConn  *conn.RPCConnection
@@ -83,6 +84,7 @@ func newSocketFile(ctx context.Context, stack *Stack, family int, skType int, pr
 	dirent := socket.NewDirent(ctx, socketDevice)
 	defer dirent.DecRef()
 	return fs.NewFile(ctx, dirent, fs.FileFlags{Read: true, Write: true}, &socketOperations{
+		family:   family,
 		wq:       &wq,
 		fd:       fd,
 		rpcConn:  stack.rpcConn,
@@ -329,6 +331,7 @@ func (s *socketOperations) Accept(t *kernel.Task, peerRequested bool, flags int,
 	if err != nil {
 		return 0, nil, 0, syserr.FromError(err)
 	}
+	t.Kernel().RecordSocket(file, s.family)
 
 	if peerRequested {
 		return fd, payload.Address.Address, payload.Address.Length, nil

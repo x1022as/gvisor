@@ -157,8 +157,8 @@ There are several factors influencing performance. The platform choice has the
 largest direct impact that varies depending on the specific workload. There is
 no best platform: Ptrace works universally, including on VM instances, but
 applications may perform at a fraction of their original levels. Beyond the
-platform choice, passthrough modes may be useful for improving perfomance at the
-cost of some isolation.
+platform choice, passthrough modes may be useful for improving performance at
+the cost of some isolation.
 
 ## Installation
 
@@ -411,7 +411,7 @@ above.
 You're using an old version of Docker. Refer to the
 [Requirements](#requirements) section for the minimum version supported.
 
-### I can’t see a file copied with `docker cp` or `kubectl cp`.
+### I can’t see a file copied with `docker cp`.
 
 For performance reasons, gVisor caches directory contents, and therefore it may
 not realize a new file was copied to a given directory. To invalidate the cache
@@ -419,6 +419,9 @@ and force a refresh, create a file under the directory in question and list the
 contents again.
 
 This bug is tracked in [bug #4](https://github.com/google/gvisor/issues/4).
+
+Note that `kubectl cp` works because it does the copy by exec'ing inside the
+sandbox, and thus gVisor cache is aware of the new files and dirs.
 
 ## Technical details
 

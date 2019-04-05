@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 load("//tools/go_generics:defs.bzl", "go_template_instance")
@@ -21,13 +21,12 @@ go_library(
         "//pkg/sentry/fs",
         "//pkg/sentry/fs/fsutil",
         "//pkg/sentry/fs/tmpfs",
-        "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/time",
         "//pkg/sentry/memmap",
-        "//pkg/sentry/platform",
         "//pkg/sentry/usage",
         "//pkg/sentry/usermem",
         "//pkg/syserror",
+        "//pkg/waiter",
     ],
 )
 

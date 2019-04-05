@@ -15,44 +15,49 @@
 package tmpfs
 
 import (
+	"fmt"
 	"io"
 	"sync"
+	"time"
 
+	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
+	"gvisor.googlesource.com/gvisor/pkg/metric"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
+	ktime "gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
+	"gvisor.googlesource.com/gvisor/pkg/syserror"
+)
+
+var (
+	opensRO  = metric.MustCreateNewUint64Metric("/in_memory_file/opens_ro", false /* sync */, "Number of times an in-memory file was opened in read-only mode.")
+	opensW   = metric.MustCreateNewUint64Metric("/in_memory_file/opens_w", false /* sync */, "Number of times an in-memory file was opened in write mode.")
+	reads    = metric.MustCreateNewUint64Metric("/in_memory_file/reads", false /* sync */, "Number of in-memory file reads.")
+	readWait = metric.MustCreateNewUint64Metric("/in_memory_file/read_wait", false /* sync */, "Time waiting on in-memory file reads, in nanoseconds.")
 )
 
 // fileInodeOperations implements fs.InodeOperations for a regular tmpfs file.
-// These files are backed by FrameRegions allocated from a platform.Memory,
-// and may be directly mapped.
+// These files are backed by pages allocated from a platform.Memory, and may be
+// directly mapped.
 //
-// The tmpfs file memory is backed by FrameRegions, each of which is reference
-// counted. frames maintains a single reference on each of the FrameRegions.
-// Since these contain the contents of the file, the reference may only be
-// decremented once this file is both deleted and all handles to the file have
-// been closed.
-//
-// Mappable users may also call IncRefOn/DecRefOn, generally to indicate that
-// they plan to use MapInto to map the file into an AddressSpace. These calls
-// include an InvalidatorRegion associated with that reference. When the
-// referenced portion of the file is removed (with Truncate), the associated
-// InvalidatorRegion is invalidated.
+// Lock order: attrMu -> mapsMu -> dataMu.
 //
 // +stateify savable
 type fileInodeOperations struct {
-	fsutil.DeprecatedFileOperations `state:"nosave"`
-	fsutil.InodeNotDirectory        `state:"nosave"`
-	fsutil.InodeNotSocket           `state:"nosave"`
-	fsutil.InodeNotSymlink          `state:"nosave"`
-	fsutil.NoopWriteOut             `state:"nosave"`
+	fsutil.InodeGenericChecker `state:"nosave"`
+	fsutil.InodeNoopWriteOut   `state:"nosave"`
+	fsutil.InodeNotDirectory   `state:"nosave"`
+	fsutil.InodeNotSocket      `state:"nosave"`
+	fsutil.InodeNotSymlink     `state:"nosave"`
 
-	// kernel is used to allocate platform memory that stores the file's contents.
+	fsutil.InodeSimpleExtendedAttributes
+
+	// kernel is used to allocate memory that stores the file's contents.
 	kernel *kernel.Kernel
 
 	// memUsage is the default memory usage that will be reported by this file.
@@ -62,10 +67,10 @@ type fileInodeOperations struct {
 
 	// attr contains the unstable metadata for the file.
 	//
-	// attr is protected by attrMu. attr.Unstable.Size is protected by both
-	// attrMu and dataMu; reading it requires locking either mutex, while
-	// mutating it requires locking both.
-	attr fsutil.InMemoryAttributes
+	// attr is protected by attrMu. attr.Size is protected by both attrMu
+	// and dataMu; reading it requires locking either mutex, while mutating
+	// it requires locking both.
+	attr fs.UnstableAttr
 
 	mapsMu sync.Mutex `state:"nosave"`
 
@@ -74,6 +79,17 @@ type fileInodeOperations struct {
 	// mappings is protected by mapsMu.
 	mappings memmap.MappingSet
 
+	// writableMappingPages tracks how many pages of virtual memory are mapped
+	// as potentially writable from this file. If a page has multiple mappings,
+	// each mapping is counted separately.
+	//
+	// This counter is susceptible to overflow as we can potentially count
+	// mappings from many VMAs. We count pages rather than bytes to slightly
+	// mitigate this.
+	//
+	// Protected by mapsMu.
+	writableMappingPages uint64
+
 	dataMu sync.RWMutex `state:"nosave"`
 
 	// data maps offsets into the file to offsets into platform.Memory() that
@@ -81,24 +97,50 @@ type fileInodeOperations struct {
 	//
 	// data is protected by dataMu.
 	data fsutil.FileRangeSet
+
+	// seals represents file seals on this inode.
+	//
+	// Protected by dataMu.
+	seals uint32
 }
 
-// NewInMemoryFile returns a new file backed by p.Memory().
-func NewInMemoryFile(ctx context.Context, usage usage.MemoryKind, uattr fs.UnstableAttr, k *kernel.Kernel) fs.InodeOperations {
+var _ fs.InodeOperations = (*fileInodeOperations)(nil)
+
+// NewInMemoryFile returns a new file backed by Kernel.MemoryFile().
+func NewInMemoryFile(ctx context.Context, usage usage.MemoryKind, uattr fs.UnstableAttr) fs.InodeOperations {
 	return &fileInodeOperations{
-		attr: fsutil.InMemoryAttributes{
-			Unstable: uattr,
-		},
-		kernel:   k,
+		attr:     uattr,
+		kernel:   kernel.KernelFromContext(ctx),
 		memUsage: usage,
+		seals:    linux.F_SEAL_SEAL,
 	}
+}
+
+// NewMemfdInode creates a new inode backing a memfd. Memory used by the memfd
+// is backed by platform memory.
+func NewMemfdInode(ctx context.Context, allowSeals bool) *fs.Inode {
+	// Per Linux, mm/shmem.c:__shmem_file_setup(), memfd inodes are set up with
+	// S_IRWXUGO.
+	perms := fs.PermMask{Read: true, Write: true, Execute: true}
+	iops := NewInMemoryFile(ctx, usage.Tmpfs, fs.UnstableAttr{
+		Owner: fs.FileOwnerFromContext(ctx),
+		Perms: fs.FilePermissions{User: perms, Group: perms, Other: perms}}).(*fileInodeOperations)
+	if allowSeals {
+		iops.seals = 0
+	}
+	return fs.NewInode(iops, fs.NewNonCachingMountSource(nil, fs.MountSourceFlags{}), fs.StableAttr{
+		Type:      fs.RegularFile,
+		DeviceID:  tmpfsDevice.DeviceID(),
+		InodeID:   tmpfsDevice.NextIno(),
+		BlockSize: usermem.PageSize,
+	})
 }
 
 // Release implements fs.InodeOperations.Release.
 func (f *fileInodeOperations) Release(context.Context) {
 	f.dataMu.Lock()
 	defer f.dataMu.Unlock()
-	f.data.DropAll(f.kernel.Platform.Memory())
+	f.data.DropAll(f.kernel.MemoryFile())
 }
 
 // Mappable implements fs.InodeOperations.Mappable.
@@ -107,12 +149,17 @@ func (f *fileInodeOperations) Mappable(*fs.Inode) memmap.Mappable {
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (*fileInodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string) error {
-	return rename(ctx, oldParent, oldName, newParent, newName)
+func (*fileInodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+	return rename(ctx, oldParent, oldName, newParent, newName, replacement)
 }
 
 // GetFile implements fs.InodeOperations.GetFile.
 func (f *fileInodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags fs.FileFlags) (*fs.File, error) {
+	if flags.Write {
+		opensW.Increment()
+	} else if flags.Read {
+		opensRO.Increment()
+	}
 	flags.Pread = true
 	flags.Pwrite = true
 	return fs.NewFile(ctx, d, flags, &regularFileOperations{iops: f}), nil
@@ -121,33 +168,12 @@ func (f *fileInodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags f
 // UnstableAttr returns unstable attributes of this tmpfs file.
 func (f *fileInodeOperations) UnstableAttr(ctx context.Context, inode *fs.Inode) (fs.UnstableAttr, error) {
 	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
 	f.dataMu.RLock()
-	defer f.dataMu.RUnlock()
-	attr := f.attr.Unstable
+	attr := f.attr
 	attr.Usage = int64(f.data.Span())
+	f.dataMu.RUnlock()
+	f.attrMu.Unlock()
 	return attr, nil
-}
-
-// Getxattr implements fs.InodeOperations.Getxattr.
-func (f *fileInodeOperations) Getxattr(inode *fs.Inode, name string) ([]byte, error) {
-	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
-	return f.attr.Getxattr(name)
-}
-
-// Setxattr implements fs.InodeOperations.Setxattr.
-func (f *fileInodeOperations) Setxattr(inode *fs.Inode, name string, value []byte) error {
-	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
-	return f.attr.Setxattr(name, value)
-}
-
-// Listxattr implements fs.InodeOperations.Listxattr.
-func (f *fileInodeOperations) Listxattr(inode *fs.Inode) (map[string]struct{}, error) {
-	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
-	return f.attr.Listxattr()
 }
 
 // Check implements fs.InodeOperations.Check.
@@ -156,36 +182,52 @@ func (f *fileInodeOperations) Check(ctx context.Context, inode *fs.Inode, p fs.P
 }
 
 // SetPermissions implements fs.InodeOperations.SetPermissions.
-func (f *fileInodeOperations) SetPermissions(ctx context.Context, inode *fs.Inode, p fs.FilePermissions) bool {
+func (f *fileInodeOperations) SetPermissions(ctx context.Context, _ *fs.Inode, p fs.FilePermissions) bool {
 	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
-	return f.attr.SetPermissions(ctx, p)
+	f.attr.SetPermissions(ctx, p)
+	f.attrMu.Unlock()
+	return true
 }
 
 // SetTimestamps implements fs.InodeOperations.SetTimestamps.
-func (f *fileInodeOperations) SetTimestamps(ctx context.Context, inode *fs.Inode, ts fs.TimeSpec) error {
+func (f *fileInodeOperations) SetTimestamps(ctx context.Context, _ *fs.Inode, ts fs.TimeSpec) error {
 	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
-	return f.attr.SetTimestamps(ctx, ts)
+	f.attr.SetTimestamps(ctx, ts)
+	f.attrMu.Unlock()
+	return nil
 }
 
 // SetOwner implements fs.InodeOperations.SetOwner.
-func (f *fileInodeOperations) SetOwner(ctx context.Context, inode *fs.Inode, owner fs.FileOwner) error {
+func (f *fileInodeOperations) SetOwner(ctx context.Context, _ *fs.Inode, owner fs.FileOwner) error {
 	f.attrMu.Lock()
-	defer f.attrMu.Unlock()
-	return f.attr.SetOwner(ctx, owner)
+	f.attr.SetOwner(ctx, owner)
+	f.attrMu.Unlock()
+	return nil
 }
 
 // Truncate implements fs.InodeOperations.Truncate.
-func (f *fileInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, size int64) error {
+func (f *fileInodeOperations) Truncate(ctx context.Context, _ *fs.Inode, size int64) error {
 	f.attrMu.Lock()
 	defer f.attrMu.Unlock()
 
 	f.dataMu.Lock()
-	oldSize := f.attr.Unstable.Size
+	oldSize := f.attr.Size
+
+	// Check if current seals allow truncation.
+	switch {
+	case size > oldSize && f.seals&linux.F_SEAL_GROW != 0: // Grow sealed
+		fallthrough
+	case oldSize > size && f.seals&linux.F_SEAL_SHRINK != 0: // Shrink sealed
+		f.dataMu.Unlock()
+		return syserror.EPERM
+	}
+
 	if oldSize != size {
-		f.attr.Unstable.Size = size
-		f.attr.TouchModificationTime(ctx)
+		f.attr.Size = size
+		// Update mtime and ctime.
+		now := ktime.NowFromContext(ctx)
+		f.attr.ModificationTime = now
+		f.attr.StatusChangeTime = now
 	}
 	f.dataMu.Unlock()
 
@@ -212,7 +254,7 @@ func (f *fileInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, siz
 	// and can remove them.
 	f.dataMu.Lock()
 	defer f.dataMu.Unlock()
-	f.data.Truncate(uint64(size), f.kernel.Platform.Memory())
+	f.data.Truncate(uint64(size), f.kernel.MemoryFile())
 
 	return nil
 }
@@ -220,21 +262,21 @@ func (f *fileInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, siz
 // AddLink implements fs.InodeOperations.AddLink.
 func (f *fileInodeOperations) AddLink() {
 	f.attrMu.Lock()
-	f.attr.Unstable.Links++
+	f.attr.Links++
 	f.attrMu.Unlock()
 }
 
 // DropLink implements fs.InodeOperations.DropLink.
 func (f *fileInodeOperations) DropLink() {
 	f.attrMu.Lock()
-	f.attr.Unstable.Links--
+	f.attr.Links--
 	f.attrMu.Unlock()
 }
 
 // NotifyStatusChange implements fs.InodeOperations.NotifyStatusChange.
 func (f *fileInodeOperations) NotifyStatusChange(ctx context.Context) {
 	f.attrMu.Lock()
-	f.attr.TouchStatusChangeTime(ctx)
+	f.attr.StatusChangeTime = ktime.NowFromContext(ctx)
 	f.attrMu.Unlock()
 }
 
@@ -248,9 +290,15 @@ func (*fileInodeOperations) StatFS(context.Context) (fs.Info, error) {
 	return fsInfo, nil
 }
 
-func (f *fileInodeOperations) read(ctx context.Context, dst usermem.IOSequence, offset int64) (int64, error) {
+func (f *fileInodeOperations) read(ctx context.Context, file *fs.File, dst usermem.IOSequence, offset int64) (int64, error) {
+	var start time.Time
+	if fs.RecordWaitTime {
+		start = time.Now()
+	}
+	reads.Increment()
 	// Zero length reads for tmpfs are no-ops.
 	if dst.NumBytes() == 0 {
+		fs.IncrementWait(readWait, start)
 		return 0, nil
 	}
 
@@ -264,17 +312,21 @@ func (f *fileInodeOperations) read(ctx context.Context, dst usermem.IOSequence, 
 	// TODO: Separate out f.attr.Size and use atomics instead of
 	// f.dataMu.
 	f.dataMu.RLock()
-	size := f.attr.Unstable.Size
+	size := f.attr.Size
 	f.dataMu.RUnlock()
 	if offset >= size {
+		fs.IncrementWait(readWait, start)
 		return 0, io.EOF
 	}
 
 	n, err := dst.CopyOutFrom(ctx, &fileReadWriter{f, offset})
-	// Compare Linux's mm/filemap.c:do_generic_file_read() => file_accessed().
-	f.attrMu.Lock()
-	f.attr.TouchAccessTime(ctx)
-	f.attrMu.Unlock()
+	if !file.Dirent.Inode.MountSource.Flags.NoAtime {
+		// Compare Linux's mm/filemap.c:do_generic_file_read() => file_accessed().
+		f.attrMu.Lock()
+		f.attr.AccessTime = ktime.NowFromContext(ctx)
+		f.attrMu.Unlock()
+	}
+	fs.IncrementWait(readWait, start)
 	return n, err
 }
 
@@ -287,7 +339,9 @@ func (f *fileInodeOperations) write(ctx context.Context, src usermem.IOSequence,
 	f.attrMu.Lock()
 	defer f.attrMu.Unlock()
 	// Compare Linux's mm/filemap.c:__generic_file_write_iter() => file_update_time().
-	f.attr.TouchModificationTime(ctx)
+	now := ktime.NowFromContext(ctx)
+	f.attr.ModificationTime = now
+	f.attr.StatusChangeTime = now
 	return src.CopyInTo(ctx, &fileReadWriter{f, offset})
 }
 
@@ -302,15 +356,15 @@ func (rw *fileReadWriter) ReadToBlocks(dsts safemem.BlockSeq) (uint64, error) {
 	defer rw.f.dataMu.RUnlock()
 
 	// Compute the range to read.
-	if rw.offset >= rw.f.attr.Unstable.Size {
+	if rw.offset >= rw.f.attr.Size {
 		return 0, io.EOF
 	}
-	end := fs.ReadEndOffset(rw.offset, int64(dsts.NumBytes()), rw.f.attr.Unstable.Size)
+	end := fs.ReadEndOffset(rw.offset, int64(dsts.NumBytes()), rw.f.attr.Size)
 	if end == rw.offset { // dsts.NumBytes() == 0?
 		return 0, nil
 	}
 
-	mem := rw.f.kernel.Platform.Memory()
+	mf := rw.f.kernel.MemoryFile()
 	var done uint64
 	seg, gap := rw.f.data.Find(uint64(rw.offset))
 	for rw.offset < end {
@@ -318,7 +372,7 @@ func (rw *fileReadWriter) ReadToBlocks(dsts safemem.BlockSeq) (uint64, error) {
 		switch {
 		case seg.Ok():
 			// Get internal mappings.
-			ims, err := mem.MapInternal(seg.FileRangeOf(seg.Range().Intersect(mr)), usermem.Read)
+			ims, err := mf.MapInternal(seg.FileRangeOf(seg.Range().Intersect(mr)), usermem.Read)
 			if err != nil {
 				return done, err
 			}
@@ -368,15 +422,43 @@ func (rw *fileReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error)
 		return 0, nil
 	}
 
+	// Check if seals prevent either file growth or all writes.
+	switch {
+	case rw.f.seals&linux.F_SEAL_WRITE != 0: // Write sealed
+		return 0, syserror.EPERM
+	case end > rw.f.attr.Size && rw.f.seals&linux.F_SEAL_GROW != 0: // Grow sealed
+		// When growth is sealed, Linux effectively allows writes which would
+		// normally grow the file to partially succeed up to the current EOF,
+		// rounded down to the page boundary before the EOF.
+		//
+		// This happens because writes (and thus the growth check) for tmpfs
+		// files proceed page-by-page on Linux, and the final write to the page
+		// containing EOF fails, resulting in a partial write up to the start of
+		// that page.
+		//
+		// To emulate this behaviour, artifically truncate the write to the
+		// start of the page containing the current EOF.
+		//
+		// See Linux, mm/filemap.c:generic_perform_write() and
+		// mm/shmem.c:shmem_write_begin().
+		if pgstart := int64(usermem.Addr(rw.f.attr.Size).RoundDown()); end > pgstart {
+			end = pgstart
+		}
+		if end <= rw.offset {
+			// Truncation would result in no data being written.
+			return 0, syserror.EPERM
+		}
+	}
+
 	defer func() {
 		// If the write ends beyond the file's previous size, it causes the
 		// file to grow.
-		if rw.offset > rw.f.attr.Unstable.Size {
-			rw.f.attr.Unstable.Size = rw.offset
+		if rw.offset > rw.f.attr.Size {
+			rw.f.attr.Size = rw.offset
 		}
 	}()
 
-	mem := rw.f.kernel.Platform.Memory()
+	mf := rw.f.kernel.MemoryFile()
 	// Page-aligned mr for when we need to allocate memory. RoundUp can't
 	// overflow since end is an int64.
 	pgstartaddr := usermem.Addr(rw.offset).RoundDown()
@@ -390,7 +472,7 @@ func (rw *fileReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error)
 		switch {
 		case seg.Ok():
 			// Get internal mappings.
-			ims, err := mem.MapInternal(seg.FileRangeOf(seg.Range().Intersect(mr)), usermem.Write)
+			ims, err := mf.MapInternal(seg.FileRangeOf(seg.Range().Intersect(mr)), usermem.Write)
 			if err != nil {
 				return done, err
 			}
@@ -410,7 +492,7 @@ func (rw *fileReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error)
 		case gap.Ok():
 			// Allocate memory for the write.
 			gapMR := gap.Range().Intersect(pgMR)
-			fr, err := mem.Allocate(gapMR.Length(), rw.f.memUsage)
+			fr, err := mf.Allocate(gapMR.Length(), rw.f.memUsage)
 			if err != nil {
 				return done, err
 			}
@@ -429,7 +511,27 @@ func (rw *fileReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error)
 func (f *fileInodeOperations) AddMapping(ctx context.Context, ms memmap.MappingSpace, ar usermem.AddrRange, offset uint64, writable bool) error {
 	f.mapsMu.Lock()
 	defer f.mapsMu.Unlock()
+
+	f.dataMu.RLock()
+	defer f.dataMu.RUnlock()
+
+	// Reject writable mapping if F_SEAL_WRITE is set.
+	if f.seals&linux.F_SEAL_WRITE != 0 && writable {
+		return syserror.EPERM
+	}
+
 	f.mappings.AddMapping(ms, ar, offset, writable)
+	if writable {
+		pagesBefore := f.writableMappingPages
+
+		// ar is guaranteed to be page aligned per memmap.Mappable.
+		f.writableMappingPages += uint64(ar.Length() / usermem.PageSize)
+
+		if f.writableMappingPages < pagesBefore {
+			panic(fmt.Sprintf("Overflow while mapping potentially writable pages pointing to a tmpfs file. Before %v, after %v", pagesBefore, f.writableMappingPages))
+		}
+	}
+
 	return nil
 }
 
@@ -437,7 +539,19 @@ func (f *fileInodeOperations) AddMapping(ctx context.Context, ms memmap.MappingS
 func (f *fileInodeOperations) RemoveMapping(ctx context.Context, ms memmap.MappingSpace, ar usermem.AddrRange, offset uint64, writable bool) {
 	f.mapsMu.Lock()
 	defer f.mapsMu.Unlock()
+
 	f.mappings.RemoveMapping(ms, ar, offset, writable)
+
+	if writable {
+		pagesBefore := f.writableMappingPages
+
+		// ar is guaranteed to be page aligned per memmap.Mappable.
+		f.writableMappingPages -= uint64(ar.Length() / usermem.PageSize)
+
+		if f.writableMappingPages > pagesBefore {
+			panic(fmt.Sprintf("Underflow while unmapping potentially writable pages pointing to a tmpfs file. Before %v, after %v", pagesBefore, f.writableMappingPages))
+		}
+	}
 }
 
 // CopyMapping implements memmap.Mappable.CopyMapping.
@@ -450,9 +564,9 @@ func (f *fileInodeOperations) Translate(ctx context.Context, required, optional 
 	f.dataMu.Lock()
 	defer f.dataMu.Unlock()
 
-	// Constrain translations to f.attr.Unstable.Size (rounded up) to prevent
+	// Constrain translations to f.attr.Size (rounded up) to prevent
 	// translation to pages that may be concurrently truncated.
-	pgend := fs.OffsetPageEnd(f.attr.Unstable.Size)
+	pgend := fs.OffsetPageEnd(f.attr.Size)
 	var beyondEOF bool
 	if required.End > pgend {
 		if required.Start >= pgend {
@@ -465,8 +579,8 @@ func (f *fileInodeOperations) Translate(ctx context.Context, required, optional 
 		optional.End = pgend
 	}
 
-	mem := f.kernel.Platform.Memory()
-	cerr := f.data.Fill(ctx, required, optional, mem, f.memUsage, func(_ context.Context, dsts safemem.BlockSeq, _ uint64) (uint64, error) {
+	mf := f.kernel.MemoryFile()
+	cerr := f.data.Fill(ctx, required, optional, mf, f.memUsage, func(_ context.Context, dsts safemem.BlockSeq, _ uint64) (uint64, error) {
 		// Newly-allocated pages are zeroed, so we don't need to do anything.
 		return dsts.NumBytes(), nil
 	})
@@ -477,8 +591,9 @@ func (f *fileInodeOperations) Translate(ctx context.Context, required, optional 
 		segMR := seg.Range().Intersect(optional)
 		ts = append(ts, memmap.Translation{
 			Source: segMR,
-			File:   mem,
+			File:   mf,
 			Offset: seg.FileRangeOf(segMR).Start,
+			Perms:  usermem.AnyAccess,
 		})
 		translatedEnd = segMR.End
 	}
@@ -497,4 +612,43 @@ func (f *fileInodeOperations) Translate(ctx context.Context, required, optional 
 // InvalidateUnsavable implements memmap.Mappable.InvalidateUnsavable.
 func (f *fileInodeOperations) InvalidateUnsavable(ctx context.Context) error {
 	return nil
+}
+
+// GetSeals returns the current set of seals on a memfd inode.
+func GetSeals(inode *fs.Inode) (uint32, error) {
+	if f, ok := inode.InodeOperations.(*fileInodeOperations); ok {
+		f.dataMu.RLock()
+		defer f.dataMu.RUnlock()
+		return f.seals, nil
+	}
+	// Not a memfd inode.
+	return 0, syserror.EINVAL
+}
+
+// AddSeals adds new file seals to a memfd inode.
+func AddSeals(inode *fs.Inode, val uint32) error {
+	if f, ok := inode.InodeOperations.(*fileInodeOperations); ok {
+		f.mapsMu.Lock()
+		defer f.mapsMu.Unlock()
+		f.dataMu.Lock()
+		defer f.dataMu.Unlock()
+
+		if f.seals&linux.F_SEAL_SEAL != 0 {
+			// Seal applied which prevents addition of any new seals.
+			return syserror.EPERM
+		}
+
+		// F_SEAL_WRITE can only be added if there are no active writable maps.
+		if f.seals&linux.F_SEAL_WRITE == 0 && val&linux.F_SEAL_WRITE != 0 {
+			if f.writableMappingPages > 0 {
+				return syserror.EBUSY
+			}
+		}
+
+		// Seals can only be added, never removed.
+		f.seals |= val
+		return nil
+	}
+	// Not a memfd inode.
+	return syserror.EINVAL
 }

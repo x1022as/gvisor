@@ -211,13 +211,6 @@ var allowedSyscalls = seccomp.SyscallRules{
 	syscall.SYS_PREAD64:   {},
 	syscall.SYS_PWRITE64:  {},
 	syscall.SYS_READ:      {},
-	syscall.SYS_READV: []seccomp.Rule{
-		{
-			seccomp.AllowAny{},
-			seccomp.AllowAny{},
-			seccomp.AllowValue(len(fdbased.BufConfig)),
-		},
-	},
 	syscall.SYS_RECVMSG: []seccomp.Rule{
 		{
 			seccomp.AllowAny{},
@@ -228,6 +221,15 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.AllowAny{},
 			seccomp.AllowAny{},
 			seccomp.AllowValue(syscall.MSG_DONTWAIT | syscall.MSG_TRUNC | syscall.MSG_PEEK),
+		},
+	},
+	syscall.SYS_RECVMMSG: []seccomp.Rule{
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowAny{},
+			seccomp.AllowValue(fdbased.MaxMsgsPerRecv),
+			seccomp.AllowValue(syscall.MSG_DONTWAIT),
+			seccomp.AllowValue(0),
 		},
 	},
 	syscall.SYS_RESTART_SYSCALL: {},
@@ -254,11 +256,19 @@ var allowedSyscalls = seccomp.SyscallRules{
 		},
 	},
 	syscall.SYS_WRITE: {},
+	// The only user in rawfile.NonBlockingWrite3 always passes iovcnt with
+	// values 2 or 3. Three iovec-s are passed, when the PACKET_VNET_HDR
+	// option is enabled for a packet socket.
 	syscall.SYS_WRITEV: []seccomp.Rule{
 		{
 			seccomp.AllowAny{},
 			seccomp.AllowAny{},
 			seccomp.AllowValue(2),
+		},
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowAny{},
+			seccomp.AllowValue(3),
 		},
 	},
 }
@@ -464,6 +474,19 @@ func controlServerFilters(fd int) seccomp.SyscallRules {
 				seccomp.AllowAny{},
 				seccomp.AllowValue(syscall.SOL_SOCKET),
 				seccomp.AllowValue(syscall.SO_PEERCRED),
+			},
+		},
+	}
+}
+
+// profileFilters returns extra syscalls made by runtime/pprof package.
+func profileFilters() seccomp.SyscallRules {
+	return seccomp.SyscallRules{
+		syscall.SYS_OPENAT: []seccomp.Rule{
+			{
+				seccomp.AllowAny{},
+				seccomp.AllowAny{},
+				seccomp.AllowValue(syscall.O_RDONLY | syscall.O_LARGEFILE | syscall.O_CLOEXEC),
 			},
 		},
 	}

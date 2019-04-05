@@ -1,6 +1,6 @@
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "arp",
@@ -30,6 +30,6 @@ go_test(
         "//pkg/tcpip/link/sniffer",
         "//pkg/tcpip/network/ipv4",
         "//pkg/tcpip/stack",
-        "//pkg/tcpip/transport/ping",
+        "//pkg/tcpip/transport/icmp",
     ],
 )

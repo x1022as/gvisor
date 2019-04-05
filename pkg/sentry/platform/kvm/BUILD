@@ -1,28 +1,6 @@
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
-
-load("//tools/go_generics:defs.bzl", "go_template_instance")
-
-go_template_instance(
-    name = "host_map_set",
-    out = "host_map_set.go",
-    consts = {
-        "minDegree": "15",
-    },
-    imports = {
-        "usermem": "gvisor.googlesource.com/gvisor/pkg/sentry/usermem",
-    },
-    package = "kvm",
-    prefix = "hostMap",
-    template = "//pkg/segment:generic_set",
-    types = {
-        "Key": "usermem.Addr",
-        "Range": "usermem.AddrRange",
-        "Value": "uintptr",
-        "Functions": "hostMapSetFunctions",
-    },
-)
+package(licenses = ["notice"])
 
 go_library(
     name = "kvm",
@@ -36,8 +14,6 @@ go_library(
         "bluepill_fault.go",
         "bluepill_unsafe.go",
         "context.go",
-        "host_map.go",
-        "host_map_set.go",
         "kvm.go",
         "kvm_amd64.go",
         "kvm_amd64_unsafe.go",
@@ -58,7 +34,6 @@ go_library(
         "//pkg/log",
         "//pkg/sentry/arch",
         "//pkg/sentry/platform",
-        "//pkg/sentry/platform/filemem",
         "//pkg/sentry/platform/interrupt",
         "//pkg/sentry/platform/procid",
         "//pkg/sentry/platform/ring0",

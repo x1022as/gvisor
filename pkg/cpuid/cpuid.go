@@ -226,7 +226,7 @@ const (
 	_ // ecx bit 25 is reserved.
 	X86FeatureBPEXT
 	X86FeaturePERFCTR_TSC
-	X86FeaturePERFCTR_L2
+	X86FeaturePERFCTR_LLC
 	X86FeatureMWAITX
 	// ECX[31:30] are reserved.
 )
@@ -338,7 +338,7 @@ var x86FeatureStrings = map[Feature]string{
 	X86FeatureRTM:        "rtm",
 	X86FeatureCQM:        "cqm",
 	X86FeatureMPX:        "mpx",
-	X86FeatureRDT:        "rdt",
+	X86FeatureRDT:        "rdt_a",
 	X86FeatureAVX512F:    "avx512f",
 	X86FeatureAVX512DQ:   "avx512dq",
 	X86FeatureRDSEED:     "rdseed",
@@ -361,6 +361,7 @@ var x86FeatureStrings = map[Feature]string{
 	X86FeatureXSAVEOPT: "xsaveopt",
 	X86FeatureXSAVEC:   "xsavec",
 	X86FeatureXGETBV1:  "xgetbv1",
+	X86FeatureXSAVES:   "xsaves",
 
 	// Block 5.
 	X86FeatureLAHF64:       "lahf_lm", // LAHF/SAHF in long mode
@@ -386,7 +387,7 @@ var x86FeatureStrings = map[Feature]string{
 	X86FeaturePERFCTR_NB:   "perfctr_nb",
 	X86FeatureBPEXT:        "bpext",
 	X86FeaturePERFCTR_TSC:  "ptsc",
-	X86FeaturePERFCTR_L2:   "perfctr_l2",
+	X86FeaturePERFCTR_LLC:  "perfctr_llc",
 	X86FeatureMWAITX:       "mwaitx",
 
 	// Block 6.
@@ -415,9 +416,6 @@ var x86FeatureParseOnlyStrings = map[Feature]string{
 
 	// Block 3.
 	X86FeaturePREFETCHWT1: "prefetchwt1",
-
-	// Block 4.
-	X86FeatureXSAVES: "xsaves",
 }
 
 // Just a way to wrap cpuid function numbers.
@@ -551,6 +549,16 @@ func (fs FeatureSet) CPUInfo(cpu uint) string {
 	fmt.Fprintln(&b, "power management:") // This is always here, but can be blank.
 	fmt.Fprintln(&b, "")                  // The /proc/cpuinfo file ends with an extra newline.
 	return b.String()
+}
+
+// AMD returns true if fs describes an AMD CPU.
+func (fs *FeatureSet) AMD() bool {
+	return fs.VendorID == "AuthenticAMD"
+}
+
+// Intel returns true if fs describes an Intel CPU.
+func (fs *FeatureSet) Intel() bool {
+	return fs.VendorID == "GenuineIntel"
 }
 
 // Helper to convert 3 regs into 12-byte vendor ID.
@@ -737,6 +745,20 @@ func (fs *FeatureSet) EmulateID(origAx, origCx uint32) (ax, bx, cx, dx uint32) {
 		cx = fs.blockMask(block(0))
 		dx = fs.blockMask(block(1))
 		ax = fs.signature()
+	case intelCacheDescriptors:
+		if !fs.Intel() {
+			// Reserved on non-Intel.
+			return 0, 0, 0, 0
+		}
+
+		// "The least-significant byte in register EAX (register AL)
+		// will always return 01H. Software should ignore this value
+		// and not interpret it as an informational descriptor." - SDM
+		//
+		// We do not support exposing cache information, but we do set
+		// this fixed field because some language runtimes (dlang) get
+		// confused by ax = 0 and will loop infinitely.
+		ax = 1
 	case xSaveInfo:
 		if !fs.UseXsave() {
 			return 0, 0, 0, 0
@@ -755,7 +777,7 @@ func (fs *FeatureSet) EmulateID(origAx, origCx uint32) (ax, bx, cx, dx uint32) {
 	case extendedFeatures:
 		cx = fs.blockMask(block(5))
 		dx = fs.blockMask(block(6))
-		if fs.VendorID == "AuthenticAMD" {
+		if fs.AMD() {
 			// AMD duplicates some block 1 features in block 6.
 			dx |= fs.blockMask(block(1)) & block6DuplicateMask
 		}

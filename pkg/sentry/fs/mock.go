@@ -16,7 +16,6 @@ package fs
 
 import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
 
@@ -133,7 +132,7 @@ func (n *MockInodeOperations) CreateDirectory(context.Context, *Inode, string, F
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (n *MockInodeOperations) Rename(ctx context.Context, oldParent *Inode, oldName string, newParent *Inode, newName string) error {
+func (n *MockInodeOperations) Rename(ctx context.Context, oldParent *Inode, oldName string, newParent *Inode, newName string, replacement bool) error {
 	n.renameCalled = true
 	return nil
 }
@@ -149,16 +148,6 @@ func (n *MockInodeOperations) Release(context.Context) {}
 // Truncate implements fs.InodeOperations.Truncate.
 func (n *MockInodeOperations) Truncate(ctx context.Context, inode *Inode, size int64) error {
 	return nil
-}
-
-// DeprecatedPwritev implements fs.InodeOperations.DeprecatedPwritev.
-func (n *MockInodeOperations) DeprecatedPwritev(context.Context, usermem.IOSequence, int64) (int64, error) {
-	return 0, nil
-}
-
-// DeprecatedReaddir implements fs.InodeOperations.DeprecatedReaddir.
-func (n *MockInodeOperations) DeprecatedReaddir(context.Context, *DirCtx, int) (int, error) {
-	return 0, nil
 }
 
 // Remove implements fs.InodeOperations.Remove.

@@ -17,7 +17,6 @@ package fsutil
 import (
 	"bytes"
 	"io"
-	"reflect"
 	"testing"
 
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
@@ -66,9 +65,6 @@ func TestSetPermissions(t *testing.T) {
 	}
 
 	// Did permissions change?
-	if !iops.dirtyAttr.Perms {
-		t.Fatalf("got perms not dirty, want dirty")
-	}
 	if iops.attr.Perms != perms {
 		t.Fatalf("got perms +%v, want +%v", iops.attr.Perms, perms)
 	}
@@ -85,9 +81,9 @@ func TestSetPermissions(t *testing.T) {
 func TestSetTimestamps(t *testing.T) {
 	ctx := contexttest.Context(t)
 	for _, test := range []struct {
-		desc      string
-		ts        fs.TimeSpec
-		wantDirty fs.AttrMask
+		desc        string
+		ts          fs.TimeSpec
+		wantChanged fs.AttrMask
 	}{
 		{
 			desc: "noop",
@@ -95,7 +91,7 @@ func TestSetTimestamps(t *testing.T) {
 				ATimeOmit: true,
 				MTimeOmit: true,
 			},
-			wantDirty: fs.AttrMask{},
+			wantChanged: fs.AttrMask{},
 		},
 		{
 			desc: "access time only",
@@ -103,9 +99,8 @@ func TestSetTimestamps(t *testing.T) {
 				ATime:     ktime.NowFromContext(ctx),
 				MTimeOmit: true,
 			},
-			wantDirty: fs.AttrMask{
-				AccessTime:       true,
-				StatusChangeTime: true,
+			wantChanged: fs.AttrMask{
+				AccessTime: true,
 			},
 		},
 		{
@@ -114,9 +109,8 @@ func TestSetTimestamps(t *testing.T) {
 				ATimeOmit: true,
 				MTime:     ktime.NowFromContext(ctx),
 			},
-			wantDirty: fs.AttrMask{
+			wantChanged: fs.AttrMask{
 				ModificationTime: true,
-				StatusChangeTime: true,
 			},
 		},
 		{
@@ -125,10 +119,9 @@ func TestSetTimestamps(t *testing.T) {
 				ATime: ktime.NowFromContext(ctx),
 				MTime: ktime.NowFromContext(ctx),
 			},
-			wantDirty: fs.AttrMask{
+			wantChanged: fs.AttrMask{
 				AccessTime:       true,
 				ModificationTime: true,
-				StatusChangeTime: true,
 			},
 		},
 		{
@@ -137,10 +130,9 @@ func TestSetTimestamps(t *testing.T) {
 				ATimeSetSystemTime: true,
 				MTimeSetSystemTime: true,
 			},
-			wantDirty: fs.AttrMask{
+			wantChanged: fs.AttrMask{
 				AccessTime:       true,
 				ModificationTime: true,
-				StatusChangeTime: true,
 			},
 		},
 	} {
@@ -159,10 +151,7 @@ func TestSetTimestamps(t *testing.T) {
 			if err := iops.SetTimestamps(ctx, nil, test.ts); err != nil {
 				t.Fatalf("SetTimestamps got error %v, want nil", err)
 			}
-			if !reflect.DeepEqual(iops.dirtyAttr, test.wantDirty) {
-				t.Fatalf("dirty got %+v, want %+v", iops.dirtyAttr, test.wantDirty)
-			}
-			if iops.dirtyAttr.AccessTime {
+			if test.wantChanged.AccessTime {
 				if !iops.attr.AccessTime.After(uattr.AccessTime) {
 					t.Fatalf("diritied access time did not advance, want %v > %v", iops.attr.AccessTime, uattr.AccessTime)
 				}
@@ -173,7 +162,7 @@ func TestSetTimestamps(t *testing.T) {
 					t.Fatalf("dirtied status change time did not advance")
 				}
 			}
-			if iops.dirtyAttr.ModificationTime {
+			if test.wantChanged.ModificationTime {
 				if !iops.attr.ModificationTime.After(uattr.ModificationTime) {
 					t.Fatalf("diritied modification time did not advance")
 				}
@@ -200,15 +189,9 @@ func TestTruncate(t *testing.T) {
 	if err := iops.Truncate(ctx, nil, uattr.Size); err != nil {
 		t.Fatalf("Truncate got error %v, want nil", err)
 	}
-	if iops.dirtyAttr.Size {
-		t.Fatalf("Truncate caused size to be dirtied")
-	}
 	var size int64 = 4096
 	if err := iops.Truncate(ctx, nil, size); err != nil {
 		t.Fatalf("Truncate got error %v, want nil", err)
-	}
-	if !iops.dirtyAttr.Size {
-		t.Fatalf("Truncate caused size to not be dirtied")
 	}
 	if iops.attr.Size != size {
 		t.Fatalf("Truncate got %d, want %d", iops.attr.Size, size)
@@ -261,15 +244,11 @@ func (noopMappingSpace) Invalidate(ar usermem.AddrRange, opts memmap.InvalidateO
 }
 
 func anonInode(ctx context.Context) *fs.Inode {
-	return fs.NewInode(NewSimpleInodeOperations(InodeSimpleAttributes{
-		UAttr: fs.WithCurrentTime(ctx, fs.UnstableAttr{
-			Owner: fs.FileOwnerFromContext(ctx),
-			Perms: fs.FilePermissions{
-				User: fs.PermMask{Read: true, Write: true},
-			},
-			Links: 1,
-		}),
-	}), fs.NewNonCachingMountSource(nil, fs.MountSourceFlags{}), fs.StableAttr{
+	return fs.NewInode(&SimpleFileInode{
+		InodeSimpleAttributes: NewInodeSimpleAttributes(ctx, fs.FileOwnerFromContext(ctx), fs.FilePermissions{
+			User: fs.PermMask{Read: true, Write: true},
+		}, 0),
+	}, fs.NewPseudoMountSource(), fs.StableAttr{
 		Type:      fs.Anonymous,
 		BlockSize: usermem.PageSize,
 	})

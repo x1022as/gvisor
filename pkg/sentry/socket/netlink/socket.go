@@ -65,11 +65,11 @@ var netlinkSocketDevice = device.NewAnonDevice()
 //
 // +stateify savable
 type Socket struct {
-	fsutil.PipeSeek      `state:"nosave"`
-	fsutil.NotDirReaddir `state:"nosave"`
-	fsutil.NoFsync       `state:"nosave"`
-	fsutil.NoopFlush     `state:"nosave"`
-	fsutil.NoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek      `state:"nosave"`
+	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileNoFsync       `state:"nosave"`
+	fsutil.FileNoopFlush     `state:"nosave"`
+	fsutil.FileNoMMap        `state:"nosave"`
 	socket.SendReceiveTimeout
 
 	// ports provides netlink port allocation.
@@ -291,6 +291,8 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level int, name int, outLen int) (in
 			if outLen < sizeOfInt32 {
 				return nil, syserr.ErrInvalidArgument
 			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
 			return int32(s.sendBufferSize), nil
 
 		case linux.SO_RCVBUF:
@@ -335,7 +337,9 @@ func (s *Socket) SetSockOpt(t *kernel.Task, level int, name int, opt []byte) *sy
 			} else if size > maxSendBufferSize {
 				size = maxSendBufferSize
 			}
+			s.mu.Lock()
 			s.sendBufferSize = size
+			s.mu.Unlock()
 			return nil
 		case linux.SO_RCVBUF:
 			if len(opt) < sizeOfInt32 {

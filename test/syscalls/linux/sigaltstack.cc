@@ -101,6 +101,7 @@ TEST(SigaltstackTest, ResetByExecve) {
   if (test_src) {
     full_path = JoinPath(test_src, "../../linux/sigaltstack_check");
   }
+
   ASSERT_FALSE(full_path.empty());
 
   pid_t child_pid = -1;
@@ -143,7 +144,7 @@ void badhandler(int sig, siginfo_t* siginfo, void* arg) {
     badhandler_recursive_faults--;
     Fault();
   }
-  FixupFault(reinterpret_cast<ucontext*>(arg));
+  FixupFault(reinterpret_cast<ucontext_t*>(arg));
 }
 
 TEST(SigaltstackTest, WalksOffBottom) {
@@ -215,7 +216,7 @@ void setonstack(int sig, siginfo_t* siginfo, void* arg) {
   stack.ss_size = SIGSTKSZ;
   setonstack_retval = sigaltstack(&stack, nullptr);
   setonstack_errno = errno;
-  FixupFault(reinterpret_cast<ucontext*>(arg));
+  FixupFault(reinterpret_cast<ucontext_t*>(arg));
 }
 
 TEST(SigaltstackTest, SetWhileOnStack) {

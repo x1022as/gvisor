@@ -75,17 +75,19 @@ var (
 	// ErrNoTransport is returned when there is no 'trans' option.
 	ErrNoTransport = errors.New("missing required option: 'trans='")
 
-	// ErrNoReadFD is returned when there is no 'rfdno' option.
-	ErrNoReadFD = errors.New("missing required option: 'rfdno='")
+	// ErrFileNoReadFD is returned when there is no 'rfdno' option.
+	ErrFileNoReadFD = errors.New("missing required option: 'rfdno='")
 
-	// ErrNoWriteFD is returned when there is no 'wfdno' option.
-	ErrNoWriteFD = errors.New("missing required option: 'wfdno='")
+	// ErrFileNoWriteFD is returned when there is no 'wfdno' option.
+	ErrFileNoWriteFD = errors.New("missing required option: 'wfdno='")
 )
 
 // filesystem is a 9p client.
 //
 // +stateify savable
 type filesystem struct{}
+
+var _ fs.Filesystem = (*filesystem)(nil)
 
 func init() {
 	fs.RegisterFilesystem(&filesystem{})
@@ -118,7 +120,7 @@ func (*filesystem) Flags() fs.FilesystemFlags {
 }
 
 // Mount returns an attached 9p client that can be positioned in the vfs.
-func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string) (*fs.Inode, error) {
+func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string, _ interface{}) (*fs.Inode, error) {
 	// Parse and validate the mount options.
 	o, err := options(data)
 	if err != nil {
@@ -160,14 +162,14 @@ func options(data string) (opts, error) {
 	// Check for the required 'rfdno=' option.
 	srfd, ok := options[readFDKey]
 	if !ok {
-		return o, ErrNoReadFD
+		return o, ErrFileNoReadFD
 	}
 	delete(options, readFDKey)
 
 	// Check for the required 'wfdno=' option.
 	swfd, ok := options[writeFDKey]
 	if !ok {
-		return o, ErrNoWriteFD
+		return o, ErrFileNoWriteFD
 	}
 	delete(options, writeFDKey)
 

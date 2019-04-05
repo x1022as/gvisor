@@ -175,6 +175,9 @@ type Config struct {
 	// Network indicates what type of network to use.
 	Network NetworkType
 
+	// GSO indicates that generic segmentation offload is enabled.
+	GSO bool
+
 	// LogPackets indicates that all network packets should be logged.
 	LogPackets bool
 
@@ -202,6 +205,9 @@ type Config struct {
 	// SIGUSR2(12) to troubleshoot hangs. -1 disables it.
 	PanicSignal int
 
+	// ProfileEnable is set to prepare the sandbox to be profiled.
+	ProfileEnable bool
+
 	// TestOnlyAllowRunAsCurrentUserWithoutChroot should only be used in
 	// tests. It allows runsc to start the sandbox process as the current
 	// user, and without chrooting the sandbox process. This can be
@@ -228,6 +234,7 @@ func (c *Config) ToFlags() []string {
 		"--strace-log-size=" + strconv.Itoa(int(c.StraceLogSize)),
 		"--watchdog-action=" + c.WatchdogAction.String(),
 		"--panic-signal=" + strconv.Itoa(c.PanicSignal),
+		"--profile=" + strconv.FormatBool(c.ProfileEnable),
 	}
 	if c.TestOnlyAllowRunAsCurrentUserWithoutChroot {
 		// Only include if set since it is never to be used by users.

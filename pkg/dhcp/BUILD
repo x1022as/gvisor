@@ -1,6 +1,6 @@
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "dhcp",
@@ -15,6 +15,7 @@ go_library(
         "//pkg/rand",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
+        "//pkg/tcpip/header",
         "//pkg/tcpip/network/ipv4",
         "//pkg/tcpip/stack",
         "//pkg/tcpip/transport/udp",

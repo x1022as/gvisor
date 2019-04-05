@@ -17,6 +17,7 @@ package fs
 import (
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/log"
+	"gvisor.googlesource.com/gvisor/pkg/metric"
 	"gvisor.googlesource.com/gvisor/pkg/refs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs/lock"
@@ -25,6 +26,8 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
+
+var opens = metric.MustCreateNewUint64Metric("/fs/opens", false /* sync */, "Number of file opens.")
 
 // Inode is a file system object that can be simultaneously referenced by different
 // components of the VFS (Dirent, fs.File, etc).
@@ -149,7 +152,8 @@ func (i *Inode) WriteOut(ctx context.Context) error {
 // Lookup calls i.InodeOperations.Lookup with i as the directory.
 func (i *Inode) Lookup(ctx context.Context, name string) (*Dirent, error) {
 	if i.overlay != nil {
-		return overlayLookup(ctx, i.overlay, i, name)
+		d, _, err := overlayLookup(ctx, i.overlay, i, name)
+		return d, err
 	}
 	return i.InodeOperations.Lookup(ctx, i, name)
 }
@@ -208,11 +212,11 @@ func (i *Inode) Remove(ctx context.Context, d *Dirent, remove *Dirent) error {
 }
 
 // Rename calls i.InodeOperations.Rename with the given arguments.
-func (i *Inode) Rename(ctx context.Context, oldParent *Dirent, renamed *Dirent, newParent *Dirent, newName string) error {
+func (i *Inode) Rename(ctx context.Context, oldParent *Dirent, renamed *Dirent, newParent *Dirent, newName string, replacement bool) error {
 	if i.overlay != nil {
-		return overlayRename(ctx, i.overlay, oldParent, renamed, newParent, newName)
+		return overlayRename(ctx, i.overlay, oldParent, renamed, newParent, newName, replacement)
 	}
-	return i.InodeOperations.Rename(ctx, oldParent.Inode, renamed.name, newParent.Inode, newName)
+	return i.InodeOperations.Rename(ctx, oldParent.Inode, renamed.name, newParent.Inode, newName, replacement)
 }
 
 // Bind calls i.InodeOperations.Bind with i as the directory.
@@ -236,6 +240,7 @@ func (i *Inode) GetFile(ctx context.Context, d *Dirent, flags FileFlags) (*File,
 	if i.overlay != nil {
 		return overlayGetFile(ctx, i.overlay, d, flags)
 	}
+	opens.Increment()
 	return i.InodeOperations.GetFile(ctx, d, flags)
 }
 
@@ -356,11 +361,10 @@ func (i *Inode) AddLink() {
 	if i.overlay != nil {
 		// FIXME: Remove this from InodeOperations altogether.
 		//
-		// This interface (including DropLink and NotifyStatusChange)
-		// is only used by ramfs to update metadata of children. These
-		// filesystems should _never_ have overlay Inodes cached as
-		// children. So explicitly disallow this scenario and avoid plumbing
-		// Dirents through to do copy up.
+		// This interface is only used by ramfs to update metadata of
+		// children. These filesystems should _never_ have overlay
+		// Inodes cached as children. So explicitly disallow this
+		// scenario and avoid plumbing Dirents through to do copy up.
 		panic("overlay Inodes cached in ramfs directories are not supported")
 	}
 	i.InodeOperations.AddLink()
@@ -373,15 +377,6 @@ func (i *Inode) DropLink() {
 		panic("overlay Inodes cached in ramfs directories are not supported")
 	}
 	i.InodeOperations.DropLink()
-}
-
-// NotifyStatusChange calls i.InodeOperations.NotifyStatusChange.
-func (i *Inode) NotifyStatusChange(ctx context.Context) {
-	if i.overlay != nil {
-		// Same as AddLink.
-		panic("overlay Inodes cached in ramfs directories are not supported")
-	}
-	i.InodeOperations.NotifyStatusChange(ctx)
 }
 
 // IsVirtual calls i.InodeOperations.IsVirtual.
@@ -399,17 +394,6 @@ func (i *Inode) StatFS(ctx context.Context) (Info, error) {
 		return overlayStatFS(ctx, i.overlay)
 	}
 	return i.InodeOperations.StatFS(ctx)
-}
-
-// HandleOps extracts HandleOperations from i.
-func (i *Inode) HandleOps() HandleOperations {
-	if i.overlay != nil {
-		return overlayHandleOps(i.overlay)
-	}
-	if h, ok := i.InodeOperations.(HandleOperations); ok {
-		return h
-	}
-	return nil
 }
 
 // CheckOwnership checks whether `ctx` owns this Inode or may act as its owner.

@@ -23,25 +23,40 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/seqnum"
 )
 
-// maxSACKBlocks is the maximum number of distinct SACKBlocks the scoreboard
-// will track. Once there are 100 distinct blocks, new insertions will fail.
-const maxSACKBlocks = 100
+const (
+	// maxSACKBlocks is the maximum number of distinct SACKBlocks the
+	// scoreboard will track. Once there are 100 distinct blocks, new
+	// insertions will fail.
+	maxSACKBlocks = 100
+
+	// defaultBtreeDegree is set to 2 as btree.New(2) results in a 2-3-4
+	// tree.
+	defaultBtreeDegree = 2
+)
 
 // SACKScoreboard stores a set of disjoint SACK ranges.
+//
+// +stateify savable
 type SACKScoreboard struct {
 	smss      uint16
 	maxSACKED seqnum.Value
-	sacked    seqnum.Size
-	ranges    *btree.BTree
+	sacked    seqnum.Size  `state:"nosave"`
+	ranges    *btree.BTree `state:"nosave"`
 }
 
 // NewSACKScoreboard returns a new SACK Scoreboard.
 func NewSACKScoreboard(smss uint16, iss seqnum.Value) *SACKScoreboard {
 	return &SACKScoreboard{
 		smss:      smss,
-		ranges:    btree.New(2),
+		ranges:    btree.New(defaultBtreeDegree),
 		maxSACKED: iss,
 	}
+}
+
+// Reset erases all known range information from the SACK scoreboard.
+func (s *SACKScoreboard) Reset() {
+	s.ranges = btree.New(defaultBtreeDegree)
+	s.sacked = 0
 }
 
 // Insert inserts/merges the provided SACKBlock into the scoreboard.
@@ -62,7 +77,7 @@ func (s *SACKScoreboard) Insert(r header.SACKBlock) {
 		sacked := i.(header.SACKBlock)
 		// There is a hole between these two SACK blocks, so we can't
 		// merge anymore.
-		if r.End.LessThan(r.Start) {
+		if r.End.LessThan(sacked.Start) {
 			return false
 		}
 		// There is some overlap at this point, merge the blocks and
@@ -152,7 +167,11 @@ func (s *SACKScoreboard) String() string {
 
 // Delete removes all SACK information prior to seq.
 func (s *SACKScoreboard) Delete(seq seqnum.Value) {
+	if s.Empty() {
+		return
+	}
 	toDelete := []btree.Item{}
+	toInsert := []btree.Item{}
 	r := header.SACKBlock{seq, seq.Add(1)}
 	s.ranges.DescendLessOrEqual(r, func(i btree.Item) bool {
 		if i == r {
@@ -164,13 +183,16 @@ func (s *SACKScoreboard) Delete(seq seqnum.Value) {
 			s.sacked -= sb.Start.Size(sb.End)
 		} else {
 			newSB := header.SACKBlock{seq, sb.End}
-			s.ranges.ReplaceOrInsert(newSB)
+			toInsert = append(toInsert, newSB)
 			s.sacked -= sb.Start.Size(seq)
 		}
 		return true
 	})
-	for _, i := range toDelete {
-		s.ranges.Delete(i)
+	for _, sb := range toDelete {
+		s.ranges.Delete(sb)
+	}
+	for _, sb := range toInsert {
+		s.ranges.ReplaceOrInsert(sb)
 	}
 }
 
@@ -201,7 +223,7 @@ func (s *SACKScoreboard) IsLost(r header.SACKBlock) bool {
 		}
 		nDupSACKBytes += sacked.Start.Size(sacked.End)
 		nDupSACK++
-		if nDupSACK >= nDupAckThreshold || nDupSACKBytes >= seqnum.Size(nDupAckThreshold*s.smss) {
+		if nDupSACK >= nDupAckThreshold || nDupSACKBytes >= seqnum.Size((nDupAckThreshold-1)*s.smss) {
 			isLost = true
 			return false
 		}

@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"testing"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/runsc/specutils"
@@ -40,12 +41,14 @@ import (
 const testDir = "test/syscalls/linux"
 
 var (
-	testName  = flag.String("test-name", "", "name of test binary to run")
-	debug     = flag.Bool("debug", false, "enable debug logs")
-	strace    = flag.Bool("strace", false, "enable strace logs")
-	platform  = flag.String("platform", "ptrace", "platform to run on")
-	parallel  = flag.Bool("parallel", false, "run tests in parallel")
-	runscPath = flag.String("runsc", "", "path to runsc binary")
+	testName   = flag.String("test-name", "", "name of test binary to run")
+	debug      = flag.Bool("debug", false, "enable debug logs")
+	strace     = flag.Bool("strace", false, "enable strace logs")
+	platform   = flag.String("platform", "ptrace", "platform to run on")
+	useTmpfs   = flag.Bool("use-tmpfs", false, "mounts tmpfs for /tmp")
+	fileAccess = flag.String("file-access", "exclusive", "mounts root in exclusive or shared mode")
+	parallel   = flag.Bool("parallel", false, "run tests in parallel")
+	runscPath  = flag.String("runsc", "", "path to runsc binary")
 )
 
 // runTestCaseNative runs the test case directly on the host machine.
@@ -80,7 +83,7 @@ func runTestCaseNative(testBin string, tc gtest.TestCase, t *testing.T) {
 
 	// Remove shard env variables so that the gunit binary does not try to
 	// intepret them.
-	env = filterEnv(env, []string{"TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS"})
+	env = filterEnv(env, []string{"TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS", "GTEST_SHARD_INDEX", "GTEST_TOTAL_SHARDS"})
 
 	cmd := exec.Command(testBin, gtest.FilterTestFlag+"="+tc.FullName())
 	cmd.Env = env
@@ -107,7 +110,40 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 	// Mark the root as writeable, as some tests attempt to
 	// write to the rootfs, and expect EACCES, not EROFS.
 	spec.Root.Readonly = false
+
+	// Test spec comes with pre-defined mounts that we don't want. Reset it.
 	spec.Mounts = nil
+	if *useTmpfs {
+		// Forces '/tmp' to be mounted as tmpfs, otherwise test that rely on
+		// features only available in gVisor's internal tmpfs may fail.
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Destination: "/tmp",
+			Type:        "tmpfs",
+		})
+	} else {
+		// Use a gofer-backed directory as '/tmp'.
+		//
+		// Tests might be running in parallel, so make sure each has a
+		// unique test temp dir.
+		//
+		// Some tests (e.g., sticky) access this mount from other
+		// users, so make sure it is world-accessible.
+		tmpDir, err := ioutil.TempDir(testutil.TmpDir(), "")
+		if err != nil {
+			t.Fatalf("could not create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		if err := os.Chmod(tmpDir, 0777); err != nil {
+			t.Fatalf("could not chmod temp dir: %v", err)
+		}
+
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Type:        "bind",
+			Destination: "/tmp",
+			Source:      tmpDir,
+		})
+	}
 
 	// Set environment variable that indicates we are
 	// running in gVisor and with the given platform.
@@ -121,7 +157,7 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 
 	// Remove shard env variables so that the gunit binary does not try to
 	// intepret them.
-	env = filterEnv(env, []string{"TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS"})
+	env = filterEnv(env, []string{"TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS", "GTEST_SHARD_INDEX", "GTEST_TOTAL_SHARDS"})
 
 	// Set TEST_TMPDIR to /tmp, as some of the syscall tests require it to
 	// be backed by tmpfs.
@@ -147,6 +183,7 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 	args := []string{
 		"-platform", *platform,
 		"-root", rootDir,
+		"-file-access", *fileAccess,
 		"--network=none",
 		"-log-format=text",
 		"-TESTONLY-unsafe-nonroot=true",
@@ -157,6 +194,21 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 	if *strace {
 		args = append(args, "-strace")
 	}
+	if outDir, ok := syscall.Getenv("TEST_UNDECLARED_OUTPUTS_DIR"); ok {
+		debugLogDir, err := ioutil.TempDir(outDir, "runsc")
+		if err != nil {
+			t.Fatalf("could not create temp dir: %v", err)
+		}
+		debugLogDir += "/"
+		log.Infof("runsc logs: %s", debugLogDir)
+		args = append(args, "-debug-log", debugLogDir)
+
+		// Default -log sends messages to stderr which makes reading the test log
+		// difficult. Instead, drop them when debug log is enabled given it's a
+		// better place for these messages.
+		args = append(args, "-log=/dev/null")
+	}
+
 	// Current process doesn't have CAP_SYS_ADMIN, create user namespace and run
 	// as root inside that namespace to get it.
 	args = append(args, "run", "--bundle", bundleDir, id)
@@ -271,7 +323,8 @@ func main() {
 		// Calculate subslice of tests to run.
 		shardSize := int(math.Ceil(float64(len(testCases)) / float64(total)))
 		begin := index * shardSize
-		end := ((index + 1) * shardSize) - 1
+		// Set end as begin of next subslice.
+		end := ((index + 1) * shardSize)
 		if begin > len(testCases) {
 			// Nothing to run.
 			return

@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -14,6 +14,7 @@ go_library(
         "dirent_cache.go",
         "dirent_list.go",
         "dirent_state.go",
+        "event_list.go",
         "file.go",
         "file_operations.go",
         "file_overlay.go",
@@ -46,8 +47,8 @@ go_library(
     deps = [
         "//pkg/abi/linux",
         "//pkg/amutex",
-        "//pkg/ilist",
         "//pkg/log",
+        "//pkg/metric",
         "//pkg/p9",
         "//pkg/refs",
         "//pkg/sentry/arch",
@@ -82,6 +83,18 @@ go_template_instance(
     },
 )
 
+go_template_instance(
+    name = "event_list",
+    out = "event_list.go",
+    package = "fs",
+    prefix = "event",
+    template = "//pkg/ilist:generic_list",
+    types = {
+        "Linker": "*Event",
+        "Element": "*Event",
+    },
+)
+
 go_test(
     name = "fs_x_test",
     size = "small",
@@ -94,7 +107,8 @@ go_test(
     deps = [
         ":fs",
         "//pkg/sentry/context",
-        "//pkg/sentry/fs/ramfs/test",
+        "//pkg/sentry/fs/fsutil",
+        "//pkg/sentry/fs/ramfs",
         "//pkg/sentry/fs/tmpfs",
         "//pkg/sentry/kernel/contexttest",
         "//pkg/sentry/usermem",

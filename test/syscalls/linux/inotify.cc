@@ -18,6 +18,7 @@
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 
 #include <atomic>
 #include <list>
@@ -1072,7 +1073,7 @@ TEST(Inotify, ChmodGeneratesAttribEvent_NoRandomSave) {
   };
 
   // Don't do cooperative S/R tests for any of the {f}chmod* syscalls below, the
-  // test will always fail because nodes cannot be saved when they have stricted
+  // test will always fail because nodes cannot be saved when they have stricter
   // permissions than the original host node.
   const DisableSave ds;
 
@@ -1222,13 +1223,34 @@ TEST(Inotify, LinkGeneratesAttribAndCreateEvents) {
 
   const int rc = link(file1.path().c_str(), link1.path().c_str());
   // link(2) is only supported on tmpfs in the sandbox.
-  SKIP_IF(IsRunningOnGvisor() && rc != 0 && errno == EPERM);
+  SKIP_IF(IsRunningOnGvisor() && rc != 0 &&
+          (errno == EPERM || errno == ENOENT));
   ASSERT_THAT(rc, SyscallSucceeds());
 
   const std::vector<Event> events =
       ASSERT_NO_ERRNO_AND_VALUE(DrainEvents(fd.get()));
   ASSERT_THAT(events, Are({Event(IN_ATTRIB, file1_wd),
                            Event(IN_CREATE, root_wd, Basename(link1.path()))}));
+}
+
+TEST(Inotify, UtimesGeneratesAttribEvent) {
+  const TempPath root = ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateDir());
+  const FileDescriptor fd =
+      ASSERT_NO_ERRNO_AND_VALUE(InotifyInit1(IN_NONBLOCK));
+  const TempPath file1 =
+      ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateFileIn(root.path()));
+
+  const FileDescriptor file1_fd =
+      ASSERT_NO_ERRNO_AND_VALUE(Open(file1.path(), O_RDWR));
+  const int wd = ASSERT_NO_ERRNO_AND_VALUE(
+      InotifyAddWatch(fd.get(), root.path(), IN_ALL_EVENTS));
+
+  struct timeval times[2] = {{1, 0}, {2, 0}};
+  EXPECT_THAT(futimes(file1_fd.get(), times), SyscallSucceeds());
+
+  const std::vector<Event> events =
+      ASSERT_NO_ERRNO_AND_VALUE(DrainEvents(fd.get()));
+  ASSERT_THAT(events, Are({Event(IN_ATTRIB, wd, Basename(file1.path()))}));
 }
 
 TEST(Inotify, HardlinksReuseSameWatch) {
@@ -1238,7 +1260,8 @@ TEST(Inotify, HardlinksReuseSameWatch) {
   TempPath link1(root.path() + "/link1");
   const int rc = link(file1.path().c_str(), link1.path().c_str());
   // link(2) is only supported on tmpfs in the sandbox.
-  SKIP_IF(IsRunningOnGvisor() && rc != 0 && errno == EPERM);
+  SKIP_IF(IsRunningOnGvisor() && rc != 0 &&
+          (errno == EPERM || errno == ENOENT));
   ASSERT_THAT(rc, SyscallSucceeds());
 
   const FileDescriptor fd =

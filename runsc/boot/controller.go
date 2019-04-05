@@ -95,6 +95,11 @@ const (
 
 	// SandboxStacks collects sandbox stacks for debugging.
 	SandboxStacks = "debug.Stacks"
+
+	// Profiling related commands (see pprof.go for more details).
+	StartCPUProfile = "Profile.StartCPUProfile"
+	StopCPUProfile  = "Profile.StopCPUProfile"
+	HeapProfile     = "Profile.HeapProfile"
 )
 
 // ControlSocketAddr generates an abstract unix socket name for the given ID.
@@ -135,6 +140,9 @@ func newController(fd int, l *Loader) (*controller, error) {
 	}
 
 	srv.Register(&debug{})
+	if l.conf.ProfileEnable {
+		srv.Register(&control.Profile{})
+	}
 
 	return &controller{
 		srv:     srv,
@@ -163,7 +171,7 @@ func (cm *containerManager) StartRoot(cid *string, _ *struct{}) error {
 	// Tell the root container to start and wait for the result.
 	cm.startChan <- struct{}{}
 	if err := <-cm.startResultChan; err != nil {
-		return fmt.Errorf("failed to start sandbox: %v", err)
+		return fmt.Errorf("starting sandbox: %v", err)
 	}
 	return nil
 }
@@ -185,7 +193,6 @@ type StartArgs struct {
 	// Spec is the spec of the container to start.
 	Spec *specs.Spec
 
-	// TODO: Separate sandbox and container configs.
 	// Config is the runsc-specific configuration for the sandbox.
 	Conf *Config
 
@@ -224,7 +231,7 @@ func (cm *containerManager) Start(args *StartArgs, _ *struct{}) error {
 	}
 	// Prevent CIDs containing ".." from confusing the sentry when creating
 	// /containers/<cid> directory.
-	// TODO: Once we have multiple independant roots, this
+	// TODO: Once we have multiple independent roots, this
 	// check won't be necessary.
 	if path.Clean(args.CID) != args.CID {
 		return fmt.Errorf("container ID shouldn't contain directory traversals such as \"..\": %q", args.CID)
@@ -235,7 +242,7 @@ func (cm *containerManager) Start(args *StartArgs, _ *struct{}) error {
 
 	err := cm.l.startContainer(cm.l.k, args.Spec, args.Conf, args.CID, args.FilePayload.Files)
 	if err != nil {
-		log.Debugf("containerManager.Start failed %q: %+v", args.CID, args)
+		log.Debugf("containerManager.Start failed %q: %+v: %v", args.CID, args, err)
 		return err
 	}
 	log.Debugf("Container %q started", args.CID)
@@ -319,25 +326,30 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 
 	p, err := createPlatform(cm.l.conf, int(deviceFile.Fd()))
 	if err != nil {
-		return fmt.Errorf("error creating platform: %v", err)
+		return fmt.Errorf("creating platform: %v", err)
 	}
 	k := &kernel.Kernel{
 		Platform: p,
 	}
+	mf, err := createMemoryFile()
+	if err != nil {
+		return fmt.Errorf("creating memory file: %v", err)
+	}
+	k.SetMemoryFile(mf)
 	cm.l.k = k
 
 	// Set up the restore environment.
 	fds := &fdDispenser{fds: cm.l.goferFDs}
 	renv, err := createRestoreEnvironment(cm.l.spec, cm.l.conf, fds)
 	if err != nil {
-		return fmt.Errorf("error creating RestoreEnvironment: %v", err)
+		return fmt.Errorf("creating RestoreEnvironment: %v", err)
 	}
 	fs.SetRestoreEnvironment(*renv)
 
 	// Prepare to load from the state file.
 	networkStack, err := newEmptyNetworkStack(cm.l.conf, k)
 	if err != nil {
-		return fmt.Errorf("failed to create network: %v", err)
+		return fmt.Errorf("creating network: %v", err)
 	}
 	if eps, ok := networkStack.(*epsocket.Stack); ok {
 		stack.StackFromEnv = eps.Stack // FIXME
@@ -347,14 +359,14 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 		return err
 	}
 	if info.Size() == 0 {
-		return fmt.Errorf("error file was empty")
+		return fmt.Errorf("file cannot be empty")
 	}
 
 	// Load the state.
 	loadOpts := state.LoadOpts{
 		Source: o.FilePayload.Files[0],
 	}
-	if err := loadOpts.Load(k, p, networkStack); err != nil {
+	if err := loadOpts.Load(k, networkStack); err != nil {
 		return err
 	}
 
@@ -376,7 +388,7 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	cm.l.mu.Lock()
 	eid := execID{cid: o.SandboxID}
 	cm.l.processes = map[execID]*execProcess{
-		eid: &execProcess{
+		eid: {
 			tg: cm.l.k.GlobalInit(),
 		},
 	}
@@ -385,7 +397,7 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	// Tell the root container to start and wait for the result.
 	cm.startChan <- struct{}{}
 	if err := <-cm.startResultChan; err != nil {
-		return fmt.Errorf("failed to start sandbox: %v", err)
+		return fmt.Errorf("starting sandbox: %v", err)
 	}
 
 	return nil

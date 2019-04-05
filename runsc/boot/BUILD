@@ -1,6 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "boot",
@@ -46,10 +46,13 @@ go_library(
         "//pkg/sentry/fs/tty",
         "//pkg/sentry/inet",
         "//pkg/sentry/kernel",
+        "//pkg/sentry/kernel:uncaught_signal_go_proto",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/kernel/kdefs",
         "//pkg/sentry/limits",
         "//pkg/sentry/loader",
+        "//pkg/sentry/memutil",
+        "//pkg/sentry/pgalloc",
         "//pkg/sentry/platform",
         "//pkg/sentry/platform/kvm",
         "//pkg/sentry/platform/ptrace",
@@ -75,7 +78,7 @@ go_library(
         "//pkg/tcpip/network/ipv4",
         "//pkg/tcpip/network/ipv6",
         "//pkg/tcpip/stack",
-        "//pkg/tcpip/transport/ping",
+        "//pkg/tcpip/transport/icmp",
         "//pkg/tcpip/transport/tcp",
         "//pkg/tcpip/transport/udp",
         "//pkg/urpc",

@@ -28,13 +28,13 @@ import (
 //
 // +stateify savable
 type regularFileOperations struct {
-	waiter.AlwaysReady   `state:"nosave"`
-	fsutil.NoopRelease   `state:"nosave"`
-	fsutil.GenericSeek   `state:"nosave"`
-	fsutil.NotDirReaddir `state:"nosave"`
-	fsutil.NoopFsync     `state:"nosave"`
-	fsutil.NoopFlush     `state:"nosave"`
-	fsutil.NoIoctl       `state:"nosave"`
+	waiter.AlwaysReady       `state:"nosave"`
+	fsutil.FileNoopRelease   `state:"nosave"`
+	fsutil.FileGenericSeek   `state:"nosave"`
+	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileNoopFsync     `state:"nosave"`
+	fsutil.FileNoopFlush     `state:"nosave"`
+	fsutil.FileNoIoctl       `state:"nosave"`
 
 	// iops is the InodeOperations of a regular tmpfs file. It is
 	// guaranteed to be the same as file.Dirent.Inode.InodeOperations,
@@ -44,7 +44,7 @@ type regularFileOperations struct {
 
 // Read implements fs.FileOperations.Read.
 func (r *regularFileOperations) Read(ctx context.Context, file *fs.File, dst usermem.IOSequence, offset int64) (int64, error) {
-	return r.iops.read(ctx, dst, offset)
+	return r.iops.read(ctx, file, dst, offset)
 }
 
 // Write implements fs.FileOperations.Write.

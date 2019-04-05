@@ -278,7 +278,7 @@ TEST_F(StatTest, LinkCountsWithRegularFileChild) {
 
 // This test verifies that inodes remain around when there is an open fd
 // after link count hits 0.
-TEST_F(StatTest, ZeroLinksOpenFdRegularFileChild) {
+TEST_F(StatTest, ZeroLinksOpenFdRegularFileChild_NoRandomSave) {
   // Setting the enviornment variable GVISOR_GOFER_UNCACHED to any value
   // will prevent this test from running, see the tmpfs lifecycle.
   //
@@ -374,6 +374,31 @@ TEST_F(StatTest, ChildOfNonDir) {
   EXPECT_THAT(lstat(filename.c_str(), &st), SyscallFailsWithErrno(ENOTDIR));
 }
 
+// Test lstating a symlink directory.
+TEST_F(StatTest, LstatSymlinkDir) {
+  // Create a directory and symlink to it.
+  const auto dir = ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateDir());
+  const std::string symlink_to_dir = NewTempAbsPath();
+  EXPECT_THAT(symlink(dir.path().c_str(), symlink_to_dir.c_str()),
+              SyscallSucceeds());
+  auto cleanup = Cleanup([&symlink_to_dir]() {
+    EXPECT_THAT(unlink(symlink_to_dir.c_str()), SyscallSucceeds());
+  });
+
+  // Lstat on the symlink should return symlink data.
+  struct stat st = {};
+  ASSERT_THAT(lstat(symlink_to_dir.c_str(), &st), SyscallSucceeds());
+  EXPECT_FALSE(S_ISDIR(st.st_mode));
+  EXPECT_TRUE(S_ISLNK(st.st_mode));
+
+  // Lstat on the symlink with a trailing slash should return the directory
+  // data.
+  ASSERT_THAT(lstat(absl::StrCat(symlink_to_dir, "/").c_str(), &st),
+              SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_FALSE(S_ISLNK(st.st_mode));
+}
+
 // Verify that we get an ELOOP from too many symbolic links even when there
 // are directories in the middle.
 TEST_F(StatTest, LstatELOOPPath) {
@@ -402,6 +427,39 @@ TEST_F(StatTest, LstatELOOPPath) {
 
   struct stat s = {};
   ASSERT_THAT(lstat(path.c_str(), &s), SyscallFailsWithErrno(ELOOP));
+}
+
+// Ensure that inode allocation for anonymous devices work correctly across
+// save/restore. In particular, inode numbers should be unique across S/R.
+TEST(SimpleStatTest, AnonDeviceAllocatesUniqueInodesAcrossSaveRestore) {
+  // Use sockets as a convenient way to create inodes on an anonymous device.
+  int fd;
+  ASSERT_THAT(fd = socket(AF_UNIX, SOCK_STREAM, 0), SyscallSucceeds());
+  FileDescriptor fd1(fd);
+  MaybeSave();
+  ASSERT_THAT(fd = socket(AF_UNIX, SOCK_STREAM, 0), SyscallSucceeds());
+  FileDescriptor fd2(fd);
+
+  struct stat st1;
+  struct stat st2;
+  ASSERT_THAT(fstat(fd1.get(), &st1), SyscallSucceeds());
+  ASSERT_THAT(fstat(fd2.get(), &st2), SyscallSucceeds());
+
+  // The two fds should have different inode numbers. Specifically, since fd2
+  // was created later, it should have a higher inode number.
+  EXPECT_GT(st2.st_ino, st1.st_ino);
+
+  // Verify again after another S/R cycle. The inode numbers should remain the
+  // same.
+  MaybeSave();
+
+  struct stat st1_after;
+  struct stat st2_after;
+  ASSERT_THAT(fstat(fd1.get(), &st1_after), SyscallSucceeds());
+  ASSERT_THAT(fstat(fd2.get(), &st2_after), SyscallSucceeds());
+
+  EXPECT_EQ(st1_after.st_ino, st1.st_ino);
+  EXPECT_EQ(st2_after.st_ino, st2.st_ino);
 }
 
 }  // namespace

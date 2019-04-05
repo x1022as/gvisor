@@ -33,6 +33,8 @@ const ashmemEnabledKey = "ashmem_enabled"
 // +stateify savable
 type filesystem struct{}
 
+var _ fs.Filesystem = (*filesystem)(nil)
+
 func init() {
 	fs.RegisterFilesystem(&filesystem{})
 }
@@ -64,7 +66,7 @@ func (*filesystem) Flags() fs.FilesystemFlags {
 }
 
 // Mount returns a devtmpfs root that can be positioned in the vfs.
-func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string) (*fs.Inode, error) {
+func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string, _ interface{}) (*fs.Inode, error) {
 	// device is always ignored.
 	// devtmpfs backed by ramfs ignores bad options. See fs/ramfs/inode.c:ramfs_parse_options.
 	//  -> we should consider parsing the mode and backing devtmpfs by this.

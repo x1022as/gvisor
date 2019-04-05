@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path"
@@ -30,10 +29,6 @@ import (
 
 	"github.com/kr/pty"
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 func getRuntime() string {
 	r := os.Getenv("RUNSC_RUNTIME")
@@ -162,8 +157,7 @@ type Docker struct {
 // MakeDocker sets up the struct for a Docker container.
 // Names of containers will be unique.
 func MakeDocker(namePrefix string) Docker {
-	suffix := fmt.Sprintf("-%06d", rand.Int())[:7]
-	return Docker{Name: namePrefix + suffix, Runtime: getRuntime()}
+	return Docker{Name: RandomName(namePrefix), Runtime: getRuntime()}
 }
 
 // Create calls 'docker create' with the arguments provided.
@@ -295,15 +289,6 @@ func (d *Docker) SandboxPid() (int, error) {
 		return -1, fmt.Errorf("error parsing pid %q: %v", out, err)
 	}
 	return pid, nil
-}
-
-// RootDirInHost returns where the root directory is mapped on the host.
-func (d *Docker) RootDirInHost() (string, error) {
-	out, err := do("inspect", "-f={{.GraphDriver.Data.MergedDir}}", d.Name)
-	if err != nil {
-		return "", fmt.Errorf("error retrieving pid: %v", err)
-	}
-	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
 // ID returns the container ID.

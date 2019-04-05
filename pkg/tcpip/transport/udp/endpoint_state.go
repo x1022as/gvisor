@@ -82,7 +82,7 @@ func (e *endpoint) afterLoad() {
 
 	var err *tcpip.Error
 	if e.state == stateConnected {
-		e.route, err = e.stack.FindRoute(e.regNICID, e.id.LocalAddress, e.id.RemoteAddress, netProto)
+		e.route, err = e.stack.FindRoute(e.regNICID, e.id.LocalAddress, e.id.RemoteAddress, netProto, e.multicastLoop)
 		if err != nil {
 			panic(*err)
 		}
@@ -102,5 +102,11 @@ func (e *endpoint) afterLoad() {
 	e.id, err = e.registerWithStack(e.regNICID, e.effectiveNetProtos, id)
 	if err != nil {
 		panic(*err)
+	}
+
+	for _, m := range e.multicastMemberships {
+		if err := e.stack.JoinGroup(e.netProto, m.nicID, m.multicastAddr); err != nil {
+			panic(err)
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
@@ -6,8 +6,6 @@ go_library(
     name = "ramfs",
     srcs = [
         "dir.go",
-        "file.go",
-        "ramfs.go",
         "socket.go",
         "symlink.go",
         "tree.go",
@@ -15,14 +13,11 @@ go_library(
     importpath = "gvisor.googlesource.com/gvisor/pkg/sentry/fs/ramfs",
     visibility = ["//pkg/sentry:internal"],
     deps = [
-        "//pkg/secio",
+        "//pkg/abi/linux",
         "//pkg/sentry/context",
         "//pkg/sentry/fs",
         "//pkg/sentry/fs/anon",
         "//pkg/sentry/fs/fsutil",
-        "//pkg/sentry/kernel/time",
-        "//pkg/sentry/memmap",
-        "//pkg/sentry/safemem",
         "//pkg/sentry/socket/unix/transport",
         "//pkg/sentry/usermem",
         "//pkg/syserror",

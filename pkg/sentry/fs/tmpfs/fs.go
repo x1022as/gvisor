@@ -21,7 +21,6 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
 )
 
@@ -49,6 +48,8 @@ const (
 //
 // +stateify savable
 type Filesystem struct{}
+
+var _ fs.Filesystem = (*Filesystem)(nil)
 
 func init() {
 	fs.RegisterFilesystem(&Filesystem{})
@@ -81,7 +82,7 @@ func (*Filesystem) Flags() fs.FilesystemFlags {
 }
 
 // Mount returns a tmpfs root that can be positioned in the vfs.
-func (f *Filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string) (*fs.Inode, error) {
+func (f *Filesystem) Mount(ctx context.Context, device string, flags fs.MountSourceFlags, data string, _ interface{}) (*fs.Inode, error) {
 	// device is always ignored.
 
 	// Parse generic comma-separated key=value options, this file system expects them.
@@ -131,5 +132,5 @@ func (f *Filesystem) Mount(ctx context.Context, device string, flags fs.MountSou
 	msrc := fs.NewCachingMountSource(f, flags)
 
 	// Construct the tmpfs root.
-	return NewDir(ctx, nil, owner, perms, msrc, kernel.KernelFromContext(ctx)), nil
+	return NewDir(ctx, nil, owner, perms, msrc), nil
 }

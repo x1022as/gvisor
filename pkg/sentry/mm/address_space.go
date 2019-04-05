@@ -179,11 +179,11 @@ func (mm *MemoryManager) mapASLocked(pseg pmaIterator, ar usermem.AddrRange, pre
 		pma := pseg.ValuePtr()
 		pmaAR := pseg.Range()
 		pmaMapAR := pmaAR.Intersect(mapAR)
-		perms := pma.vmaEffectivePerms
+		perms := pma.effectivePerms
 		if pma.needCOW {
 			perms.Write = false
 		}
-		if err := pma.file.MapInto(mm.as, pmaMapAR.Start, pseg.fileRangeOf(pmaMapAR), perms, precommit); err != nil {
+		if err := mm.as.MapFile(pmaMapAR.Start, pma.file, pseg.fileRangeOf(pmaMapAR), perms, precommit); err != nil {
 			return err
 		}
 		pseg = pseg.NextSegment()

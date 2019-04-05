@@ -22,6 +22,7 @@
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
+#include "test/util/file_descriptor.h"
 #include "test/util/posix_error.h"
 #include "test/util/temp_path.h"
 #include "test/util/thread_util.h"
@@ -389,23 +390,32 @@ Creator<SocketPair> TCPAcceptBindSocketPairCreator(int domain, int type,
 }
 
 template <typename T>
-PosixErrorOr<std::unique_ptr<AddrFDSocketPair>>
-CreateUDPBidirectionalBindSocketPair(int sock1, int sock2, int type,
-                                     bool dual_stack) {
+PosixErrorOr<std::unique_ptr<AddrFDSocketPair>> CreateUDPBoundSocketPair(
+    int sock1, int sock2, int type, bool dual_stack) {
   ASSIGN_OR_RETURN_ERRNO(T addr1, BindIP<T>(sock1, dual_stack));
   ASSIGN_OR_RETURN_ERRNO(T addr2, BindIP<T>(sock2, dual_stack));
 
+  return absl::make_unique<AddrFDSocketPair>(sock1, sock2, addr1, addr2);
+}
+
+template <typename T>
+PosixErrorOr<std::unique_ptr<AddrFDSocketPair>>
+CreateUDPBidirectionalBindSocketPair(int sock1, int sock2, int type,
+                                     bool dual_stack) {
+  ASSIGN_OR_RETURN_ERRNO(
+      auto socks, CreateUDPBoundSocketPair<T>(sock1, sock2, type, dual_stack));
+
   // Connect sock1 to sock2.
-  RETURN_ERROR_IF_SYSCALL_FAIL(connect(
-      sock1, reinterpret_cast<struct sockaddr*>(&addr2), sizeof(addr2)));
+  RETURN_ERROR_IF_SYSCALL_FAIL(connect(socks->first_fd(), socks->second_addr(),
+                                       socks->second_addr_size()));
   MaybeSave();  // Successful connection.
 
   // Connect sock2 to sock1.
-  RETURN_ERROR_IF_SYSCALL_FAIL(connect(
-      sock2, reinterpret_cast<struct sockaddr*>(&addr1), sizeof(addr1)));
+  RETURN_ERROR_IF_SYSCALL_FAIL(connect(socks->second_fd(), socks->first_addr(),
+                                       socks->first_addr_size()));
   MaybeSave();  // Successful connection.
 
-  return absl::make_unique<AddrFDSocketPair>(sock1, sock2, addr1, addr2);
+  return socks;
 }
 
 Creator<SocketPair> UDPBidirectionalBindSocketPairCreator(int domain, int type,
@@ -429,6 +439,21 @@ Creator<SocketPair> UDPBidirectionalBindSocketPairCreator(int domain, int type,
   };
 }
 
+Creator<SocketPair> UDPUnboundSocketPairCreator(int domain, int type,
+                                                int protocol, bool dual_stack) {
+  return [=]() -> PosixErrorOr<std::unique_ptr<FDSocketPair>> {
+    int sock1;
+    RETURN_ERROR_IF_SYSCALL_FAIL(sock1 = socket(domain, type, protocol));
+    MaybeSave();  // Successful socket creation.
+
+    int sock2;
+    RETURN_ERROR_IF_SYSCALL_FAIL(sock2 = socket(domain, type, protocol));
+    MaybeSave();  // Successful socket creation.
+
+    return absl::make_unique<FDSocketPair>(sock1, sock2);
+  };
+}
+
 SocketPairKind Reversed(SocketPairKind const& base) {
   auto const& creator = base.creator;
   return SocketPairKind{
@@ -437,6 +462,17 @@ SocketPairKind Reversed(SocketPairKind const& base) {
         ASSIGN_OR_RETURN_ERRNO(auto creator_value, creator());
         return absl::make_unique<ReversedSocketPair>(std::move(creator_value));
       }};
+}
+
+Creator<FileDescriptor> UnboundSocketCreator(int domain, int type,
+                                             int protocol) {
+  return [=]() -> PosixErrorOr<std::unique_ptr<FileDescriptor>> {
+    int sock;
+    RETURN_ERROR_IF_SYSCALL_FAIL(sock = socket(domain, type, protocol));
+    MaybeSave();  // Successful socket creation.
+
+    return absl::make_unique<FileDescriptor>(sock);
+  };
 }
 
 std::vector<SocketPairKind> IncludeReversals(std::vector<SocketPairKind> vec) {
@@ -654,6 +690,57 @@ void RecvNoData(int sock) {
   msg.msg_iovlen = 1;
   ASSERT_THAT(RetryEINTR(recvmsg)(sock, &msg, MSG_DONTWAIT),
               SyscallFailsWithErrno(EAGAIN));
+}
+
+TestAddress V4Any() {
+  TestAddress t("V4Any");
+  t.addr.ss_family = AF_INET;
+  t.addr_len = sizeof(sockaddr_in);
+  reinterpret_cast<sockaddr_in*>(&t.addr)->sin_addr.s_addr = htonl(INADDR_ANY);
+  return t;
+}
+
+TestAddress V4Loopback() {
+  TestAddress t("V4Loopback");
+  t.addr.ss_family = AF_INET;
+  t.addr_len = sizeof(sockaddr_in);
+  reinterpret_cast<sockaddr_in*>(&t.addr)->sin_addr.s_addr =
+      htonl(INADDR_LOOPBACK);
+  return t;
+}
+
+TestAddress V4MappedAny() {
+  TestAddress t("V4MappedAny");
+  t.addr.ss_family = AF_INET6;
+  t.addr_len = sizeof(sockaddr_in6);
+  inet_pton(AF_INET6, "::ffff:0.0.0.0",
+            reinterpret_cast<sockaddr_in6*>(&t.addr)->sin6_addr.s6_addr);
+  return t;
+}
+
+TestAddress V4MappedLoopback() {
+  TestAddress t("V4MappedLoopback");
+  t.addr.ss_family = AF_INET6;
+  t.addr_len = sizeof(sockaddr_in6);
+  inet_pton(AF_INET6, "::ffff:127.0.0.1",
+            reinterpret_cast<sockaddr_in6*>(&t.addr)->sin6_addr.s6_addr);
+  return t;
+}
+
+TestAddress V6Any() {
+  TestAddress t("V6Any");
+  t.addr.ss_family = AF_INET6;
+  t.addr_len = sizeof(sockaddr_in6);
+  reinterpret_cast<sockaddr_in6*>(&t.addr)->sin6_addr = in6addr_any;
+  return t;
+}
+
+TestAddress V6Loopback() {
+  TestAddress t("V6Loopback");
+  t.addr.ss_family = AF_INET6;
+  t.addr_len = sizeof(sockaddr_in6);
+  reinterpret_cast<sockaddr_in6*>(&t.addr)->sin6_addr = in6addr_loopback;
+  return t;
 }
 
 }  // namespace testing

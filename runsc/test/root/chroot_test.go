@@ -26,8 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,12 +50,13 @@ func TestChroot(t *testing.T) {
 	}
 
 	// Check that sandbox is chroot'ed.
-	chroot, err := filepath.EvalSymlinks(filepath.Join("/proc", strconv.Itoa(pid), "root"))
+	procRoot := filepath.Join("/proc", strconv.Itoa(pid), "root")
+	chroot, err := filepath.EvalSymlinks(procRoot)
 	if err != nil {
 		t.Fatalf("error resolving /proc/<pid>/root symlink: %v", err)
 	}
-	if want := "/tmp/runsc-sandbox-chroot-"; !strings.HasPrefix(chroot, want) {
-		t.Errorf("sandbox is not chroot'd, it should be inside: %q, got: %q", want, chroot)
+	if chroot != "/" {
+		t.Errorf("sandbox is not chroot'd, it should be inside: /, got: %q", chroot)
 	}
 
 	path, err := filepath.EvalSymlinks(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
@@ -68,28 +67,20 @@ func TestChroot(t *testing.T) {
 		t.Errorf("sandbox current dir is wrong, want: %q, got: %q", chroot, path)
 	}
 
-	fi, err := ioutil.ReadDir(chroot)
+	fi, err := ioutil.ReadDir(procRoot)
 	if err != nil {
 		t.Fatalf("error listing %q: %v", chroot, err)
 	}
-	if want, got := 2, len(fi); want != got {
-		t.Fatalf("chroot dir got %d entries, want %d", want, got)
+	if want, got := 1, len(fi); want != got {
+		t.Fatalf("chroot dir got %d entries, want %d", got, want)
 	}
 
-	// chroot dir is prepared by runsc and should contains only the executable
-	// and /proc.
-	files := []string{fi[0].Name(), fi[1].Name()}
-	sort.Strings(files)
-	if want := []string{"proc", "runsc"}; !reflect.DeepEqual(files, want) {
-		t.Errorf("chroot got children %v, want %v", files, want)
+	// chroot dir is prepared by runsc and should contains only /proc.
+	if fi[0].Name() != "proc" {
+		t.Errorf("chroot got children %v, want %v", fi[0].Name(), "proc")
 	}
 
 	d.CleanUp()
-
-	// Check that chroot directory was cleaned up.
-	if _, err := os.Stat(chroot); err == nil || !os.IsNotExist(err) {
-		t.Errorf("chroot directory %q was not deleted: %v", chroot, err)
-	}
 }
 
 func TestChrootGofer(t *testing.T) {
@@ -127,10 +118,7 @@ func TestChrootGofer(t *testing.T) {
 
 	// This where the root directory is mapped on the host and that's where the
 	// gofer must have chroot'd to.
-	root, err := d.RootDirInHost()
-	if err != nil {
-		t.Fatalf("Docker.RootDirInHost(): %v", err)
-	}
+	root := "/root"
 
 	for _, child := range children {
 		childPID, err := strconv.Atoi(child)

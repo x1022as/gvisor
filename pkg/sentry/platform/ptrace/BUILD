@@ -1,6 +1,6 @@
 load("//tools/go_stateify:defs.bzl", "go_library")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 go_library(
     name = "ptrace",
@@ -23,7 +23,6 @@ go_library(
         "//pkg/seccomp",
         "//pkg/sentry/arch",
         "//pkg/sentry/platform",
-        "//pkg/sentry/platform/filemem",
         "//pkg/sentry/platform/interrupt",
         "//pkg/sentry/platform/procid",
         "//pkg/sentry/platform/safecopy",

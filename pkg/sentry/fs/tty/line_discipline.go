@@ -140,9 +140,9 @@ func (l *lineDiscipline) setTermios(ctx context.Context, io usermem.IO, args arc
 	// buffer to its read buffer. Anything already in the read buffer is
 	// now readable.
 	if oldCanonEnabled && !l.termios.LEnabled(linux.ICANON) {
-		if n := l.inQueue.pushWaitBuf(l); n > 0 {
-			l.slaveWaiter.Notify(waiter.EventIn)
-		}
+		l.inQueue.pushWaitBuf(l)
+		l.inQueue.readable = true
+		l.slaveWaiter.Notify(waiter.EventIn)
 	}
 
 	return 0, err
@@ -263,7 +263,7 @@ type outputQueueTransformer struct{}
 // transform does output processing for one end of the pty. See
 // drivers/tty/n_tty.c:do_output_char for an analogous kernel function.
 //
-// Precondition:
+// Preconditions:
 // * l.termiosMu must be held for reading.
 // * q.mu must be held.
 func (*outputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte) int {
@@ -271,25 +271,27 @@ func (*outputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte
 	// master termios never has ICANON set.
 
 	if !l.termios.OEnabled(linux.OPOST) {
-		n, _ := q.readBuf.Write(buf)
-		if q.readBuf.Len() > 0 {
+		q.readBuf = append(q.readBuf, buf...)
+		if len(q.readBuf) > 0 {
 			q.readable = true
 		}
-		return n
+		return len(buf)
 	}
 
 	var ret int
 	for len(buf) > 0 {
-		c, size := l.peekRune(buf)
+		size := l.peek(buf)
+		cBytes := append([]byte{}, buf[:size]...)
 		ret += size
 		buf = buf[size:]
-		switch c {
+		// We're guaranteed that cBytes has at least one element.
+		switch cBytes[0] {
 		case '\n':
 			if l.termios.OEnabled(linux.ONLRET) {
 				l.column = 0
 			}
 			if l.termios.OEnabled(linux.ONLCR) {
-				q.readBuf.Write([]byte{'\r', '\n'})
+				q.readBuf = append(q.readBuf, '\r', '\n')
 				continue
 			}
 		case '\r':
@@ -297,7 +299,7 @@ func (*outputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte
 				continue
 			}
 			if l.termios.OEnabled(linux.OCRNL) {
-				c = '\n'
+				cBytes[0] = '\n'
 				if l.termios.OEnabled(linux.ONLRET) {
 					l.column = 0
 				}
@@ -308,7 +310,7 @@ func (*outputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte
 			spaces := spacesPerTab - l.column%spacesPerTab
 			if l.termios.OutputFlags&linux.TABDLY == linux.XTABS {
 				l.column += spaces
-				q.readBuf.Write(bytes.Repeat([]byte{' '}, spacesPerTab))
+				q.readBuf = append(q.readBuf, bytes.Repeat([]byte{' '}, spacesPerTab)...)
 				continue
 			}
 			l.column += spaces
@@ -319,9 +321,9 @@ func (*outputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte
 		default:
 			l.column++
 		}
-		q.readBuf.WriteRune(c)
+		q.readBuf = append(q.readBuf, cBytes...)
 	}
-	if q.readBuf.Len() > 0 {
+	if len(q.readBuf) > 0 {
 		q.readable = true
 	}
 	return ret
@@ -338,7 +340,7 @@ type inputQueueTransformer struct{}
 // drivers/tty/n_tty.c:n_tty_receive_char_special for an analogous kernel
 // function.
 //
-// Precondition:
+// Preconditions:
 // * l.termiosMu must be held for reading.
 // * q.mu must be held.
 func (*inputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte) int {
@@ -354,9 +356,11 @@ func (*inputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte)
 	}
 
 	var ret int
-	for len(buf) > 0 && q.readBuf.Len() < canonMaxBytes {
-		c, size := l.peekRune(buf)
-		switch c {
+	for len(buf) > 0 && len(q.readBuf) < canonMaxBytes {
+		size := l.peek(buf)
+		cBytes := append([]byte{}, buf[:size]...)
+		// We're guaranteed that cBytes has at least one element.
+		switch cBytes[0] {
 		case '\r':
 			if l.termios.IEnabled(linux.IGNCR) {
 				buf = buf[size:]
@@ -364,53 +368,52 @@ func (*inputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte)
 				continue
 			}
 			if l.termios.IEnabled(linux.ICRNL) {
-				c = '\n'
+				cBytes[0] = '\n'
 			}
 		case '\n':
 			if l.termios.IEnabled(linux.INLCR) {
-				c = '\r'
+				cBytes[0] = '\r'
 			}
 		}
 
 		// In canonical mode, we discard non-terminating characters
 		// after the first 4095.
-		if l.shouldDiscard(q, c) {
+		if l.shouldDiscard(q, cBytes) {
 			buf = buf[size:]
 			ret += size
 			continue
 		}
 
 		// Stop if the buffer would be overfilled.
-		if q.readBuf.Len()+size > maxBytes {
+		if len(q.readBuf)+size > maxBytes {
 			break
 		}
-		cBytes := buf[:size]
 		buf = buf[size:]
 		ret += size
 
 		// If we get EOF, make the buffer available for reading.
-		if l.termios.LEnabled(linux.ICANON) && l.termios.IsEOF(c) {
+		if l.termios.LEnabled(linux.ICANON) && l.termios.IsEOF(cBytes[0]) {
 			q.readable = true
 			break
 		}
 
-		q.readBuf.WriteRune(c)
+		q.readBuf = append(q.readBuf, cBytes...)
+
 		// Anything written to the readBuf will have to be echoed.
 		if l.termios.LEnabled(linux.ECHO) {
-			if l.outQueue.writeBytes(cBytes, l) > 0 {
-				l.masterWaiter.Notify(waiter.EventIn)
-			}
+			l.outQueue.writeBytes(cBytes, l)
+			l.masterWaiter.Notify(waiter.EventIn)
 		}
 
 		// If we finish a line, make it available for reading.
-		if l.termios.LEnabled(linux.ICANON) && l.termios.IsTerminating(c) {
+		if l.termios.LEnabled(linux.ICANON) && l.termios.IsTerminating(cBytes) {
 			q.readable = true
 			break
 		}
 	}
 
 	// In noncanonical mode, everything is readable.
-	if !l.termios.LEnabled(linux.ICANON) && q.readBuf.Len() > 0 {
+	if !l.termios.LEnabled(linux.ICANON) && len(q.readBuf) > 0 {
 		q.readable = true
 	}
 
@@ -424,21 +427,17 @@ func (*inputQueueTransformer) transform(l *lineDiscipline, q *queue, buf []byte)
 // Precondition:
 // * l.termiosMu must be held for reading.
 // * q.mu must be held.
-func (l *lineDiscipline) shouldDiscard(q *queue, c rune) bool {
-	return l.termios.LEnabled(linux.ICANON) && q.readBuf.Len()+utf8.RuneLen(c) >= canonMaxBytes && !l.termios.IsTerminating(c)
+func (l *lineDiscipline) shouldDiscard(q *queue, cBytes []byte) bool {
+	return l.termios.LEnabled(linux.ICANON) && len(q.readBuf)+len(cBytes) >= canonMaxBytes && !l.termios.IsTerminating(cBytes)
 }
 
-// peekRune returns the first rune from the byte array depending on whether
-// UTF8 is enabled.
-func (l *lineDiscipline) peekRune(b []byte) (rune, int) {
-	var c rune
-	var size int
+// peek returns the size in bytes of the next character to process. As long as
+// b isn't empty, peek returns a value of at least 1.
+func (l *lineDiscipline) peek(b []byte) int {
+	size := 1
 	// If UTF-8 support is enabled, runes might be multiple bytes.
 	if l.termios.IEnabled(linux.IUTF8) {
-		c, size = utf8.DecodeRune(b)
-	} else {
-		c = rune(b[0])
-		size = 1
+		_, size = utf8.DecodeRune(b)
 	}
-	return c, size
+	return size
 }

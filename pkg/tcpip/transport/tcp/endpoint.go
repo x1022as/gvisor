@@ -15,6 +15,7 @@
 package tcp
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -116,6 +117,9 @@ type endpoint struct {
 	route             stack.Route `state:"manual"`
 	v6only            bool
 	isConnectNotified bool
+	// TCP should never broadcast but Linux nevertheless supports enabling/
+	// disabling SO_BROADCAST, albeit as a NOOP.
+	broadcast bool
 
 	// effectiveNetProtos contains the network protocols actually in use. In
 	// most cases it will only contain "netProto", but in cases like IPv6
@@ -174,6 +178,9 @@ type endpoint struct {
 	//
 	// cork is a boolean (0 is false) and must be accessed atomically.
 	cork uint32
+
+	// scoreboard holds TCP SACK Scoreboard information for this endpoint.
+	scoreboard *SACKScoreboard
 
 	// The options below aren't implemented, but we remember the user
 	// settings because applications expect to be able to set/query these
@@ -259,6 +266,8 @@ type endpoint struct {
 	// The following are only used to assist the restore run to re-connect.
 	bindAddress       tcpip.Address
 	connectingAddress tcpip.Address
+
+	gso *stack.GSO
 }
 
 // StopWork halts packet processing. Only to be used in tests.
@@ -410,18 +419,18 @@ func (e *endpoint) Close() {
 
 	e.mu.Lock()
 
-	// We always release ports inline so that they are immediately available
-	// for reuse after Close() is called. If also registered, it means this
-	// is a listening socket, so we must unregister as well otherwise the
-	// next user would fail in Listen() when trying to register.
-	if e.isPortReserved {
-		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.id.LocalAddress, e.id.LocalPort)
-		e.isPortReserved = false
-
+	// For listening sockets, we always release ports inline so that they
+	// are immediately available for reuse after Close() is called. If also
+	// registered, we unregister as well otherwise the next user would fail
+	// in Listen() when trying to register.
+	if e.state == stateListen && e.isPortReserved {
 		if e.isRegistered {
 			e.stack.UnregisterTransportEndpoint(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.id, e)
 			e.isRegistered = false
 		}
+
+		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.id.LocalAddress, e.id.LocalPort)
+		e.isPortReserved = false
 	}
 
 	// Either perform the local cleanup or kick the worker to make sure it
@@ -457,6 +466,12 @@ func (e *endpoint) cleanupLocked() {
 
 	if e.isRegistered {
 		e.stack.UnregisterTransportEndpoint(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.id, e)
+		e.isRegistered = false
+	}
+
+	if e.isPortReserved {
+		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.id.LocalAddress, e.id.LocalPort)
+		e.isPortReserved = false
 	}
 
 	e.route.Release()
@@ -807,6 +822,12 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 		e.notifyProtocolGoroutine(notifyKeepaliveChanged)
 		return nil
 
+	case tcpip.BroadcastOption:
+		e.mu.Lock()
+		e.broadcast = v != 0
+		e.mu.Unlock()
+		return nil
+
 	default:
 		return nil
 	}
@@ -965,6 +986,17 @@ func (e *endpoint) GetSockOpt(opt interface{}) *tcpip.Error {
 		*o = 1
 		return nil
 
+	case *tcpip.BroadcastOption:
+		e.mu.Lock()
+		v := e.broadcast
+		e.mu.Unlock()
+
+		*o = 0
+		if v {
+			*o = 1
+		}
+		return nil
+
 	default:
 		return tcpip.ErrUnknownProtocolOption
 	}
@@ -1062,7 +1094,7 @@ func (e *endpoint) connect(addr tcpip.FullAddress, handshake bool, run bool) (er
 	}
 
 	// Find a route to the desired destination.
-	r, err := e.stack.FindRoute(nicid, e.id.LocalAddress, addr.Addr, netProto)
+	r, err := e.stack.FindRoute(nicid, e.id.LocalAddress, addr.Addr, netProto, false /* multicastLoop */)
 	if err != nil {
 		return err
 	}
@@ -1125,6 +1157,8 @@ func (e *endpoint) connect(addr tcpip.FullAddress, handshake bool, run bool) (er
 	e.boundNICID = nicid
 	e.effectiveNetProtos = netProtos
 	e.connectingAddress = connectingAddr
+
+	e.initGSO()
 
 	// Connect in the restore phase does not perform handshake. Restore its
 	// connection setting here.
@@ -1307,7 +1341,7 @@ func (e *endpoint) Accept() (tcpip.Endpoint, *waiter.Queue, *tcpip.Error) {
 }
 
 // Bind binds the endpoint to a specific local port and optionally address.
-func (e *endpoint) Bind(addr tcpip.FullAddress, commit func() *tcpip.Error) (err *tcpip.Error) {
+func (e *endpoint) Bind(addr tcpip.FullAddress) (err *tcpip.Error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -1368,14 +1402,6 @@ func (e *endpoint) Bind(addr tcpip.FullAddress, commit func() *tcpip.Error) (err
 		e.id.LocalAddress = addr.Addr
 	}
 
-	// Check the commit function.
-	if commit != nil {
-		if err := commit(); err != nil {
-			// The defer takes care of unwind.
-			return err
-		}
-	}
-
 	// Mark endpoint as bound.
 	e.state = stateBound
 
@@ -1422,7 +1448,7 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, vv
 	}
 
 	e.stack.Stats().TCP.ValidSegmentsReceived.Increment()
-	if (s.flags & flagRst) != 0 {
+	if (s.flags & header.TCPFlagRst) != 0 {
 		e.stack.Stats().TCP.ResetsReceived.Increment()
 	}
 
@@ -1575,6 +1601,16 @@ func (e *endpoint) maybeEnableSACKPermitted(synOpts *header.TCPSynOptions) {
 	}
 }
 
+// maxOptionSize return the maximum size of TCP options.
+func (e *endpoint) maxOptionSize() (size int) {
+	var maxSackBlocks [header.TCPMaxSACKBlocks]header.SACKBlock
+	options := e.makeOptions(maxSackBlocks[:])
+	size = len(options)
+	putOptions(options)
+
+	return size
+}
+
 // completeState makes a full copy of the endpoint and returns it. This is used
 // before invoking the probe. The state returned may not be fully consistent if
 // there are intervening syscalls when the state is being copied.
@@ -1601,6 +1637,7 @@ func (e *endpoint) completeState() stack.TCPEndpointState {
 	s.SACKPermitted = e.sackPermitted
 	s.SACK.Blocks = make([]header.SACKBlock, e.sack.NumBlocks)
 	copy(s.SACK.Blocks, e.sack.Blocks[:e.sack.NumBlocks])
+	s.SACK.ReceivedBlocks, s.SACK.MaxSACKED = e.scoreboard.Copy()
 
 	// Copy endpoint send state.
 	e.sndBufMu.Lock()
@@ -1665,4 +1702,26 @@ func (e *endpoint) completeState() stack.TCPEndpointState {
 		}
 	}
 	return s
+}
+
+func (e *endpoint) initGSO() {
+	if e.route.Capabilities()&stack.CapabilityGSO == 0 {
+		return
+	}
+
+	gso := &stack.GSO{}
+	switch e.netProto {
+	case header.IPv4ProtocolNumber:
+		gso.Type = stack.GSOTCPv4
+		gso.L3HdrLen = header.IPv4MinimumSize
+	case header.IPv6ProtocolNumber:
+		gso.Type = stack.GSOTCPv6
+		gso.L3HdrLen = header.IPv6MinimumSize
+	default:
+		panic(fmt.Sprintf("Unknown netProto: %v", e.netProto))
+	}
+	gso.NeedsCsum = true
+	gso.CsumOffset = header.TCPChecksumOffset()
+	gso.MaxSize = e.route.GSOMaxSize()
+	e.gso = gso
 }

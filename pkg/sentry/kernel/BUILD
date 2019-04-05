@@ -1,6 +1,6 @@
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -34,7 +34,7 @@ go_template_instance(
     out = "seqatomic_taskgoroutineschedinfo.go",
     package = "kernel",
     suffix = "TaskGoroutineSchedInfo",
-    template = "//pkg/sync:generic_seqatomic",
+    template = "//third_party/gvsync:generic_seqatomic",
     types = {
         "Value": "TaskGoroutineSchedInfo",
     },
@@ -95,6 +95,8 @@ go_library(
         "posixtimer.go",
         "process_group_list.go",
         "ptrace.go",
+        "ptrace_amd64.go",
+        "ptrace_arm64.go",
         "rseq.go",
         "seccomp.go",
         "seqatomic_taskgoroutineschedinfo.go",
@@ -135,6 +137,7 @@ go_library(
     importpath = "gvisor.googlesource.com/gvisor/pkg/sentry/kernel",
     imports = [
         "gvisor.googlesource.com/gvisor/pkg/bpf",
+        "gvisor.googlesource.com/gvisor/pkg/sentry/device",
         "gvisor.googlesource.com/gvisor/pkg/tcpip",
     ],
     visibility = ["//:sandbox"],
@@ -154,6 +157,7 @@ go_library(
         "//pkg/secio",
         "//pkg/sentry/arch",
         "//pkg/sentry/context",
+        "//pkg/sentry/device",
         "//pkg/sentry/fs",
         "//pkg/sentry/fs/lock",
         "//pkg/sentry/fs/timerfd",
@@ -171,6 +175,7 @@ go_library(
         "//pkg/sentry/loader",
         "//pkg/sentry/memmap",
         "//pkg/sentry/mm",
+        "//pkg/sentry/pgalloc",
         "//pkg/sentry/platform",
         "//pkg/sentry/safemem",
         "//pkg/sentry/socket/netlink/port",
@@ -183,12 +188,12 @@ go_library(
         "//pkg/sentry/usermem",
         "//pkg/state",
         "//pkg/state/statefile",
-        "//pkg/sync",
         "//pkg/syserr",
         "//pkg/syserror",
         "//pkg/tcpip",
         "//pkg/tcpip/stack",
         "//pkg/waiter",
+        "//third_party/gvsync",
     ],
 )
 
@@ -210,7 +215,7 @@ go_test(
         "//pkg/sentry/kernel/kdefs",
         "//pkg/sentry/kernel/sched",
         "//pkg/sentry/limits",
-        "//pkg/sentry/platform",
+        "//pkg/sentry/pgalloc",
         "//pkg/sentry/time",
         "//pkg/sentry/usage",
         "//pkg/sentry/usermem",

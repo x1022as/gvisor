@@ -43,6 +43,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/cpuid"
 	"gvisor.googlesource.com/gvisor/pkg/eventchannel"
 	"gvisor.googlesource.com/gvisor/pkg/log"
+	"gvisor.googlesource.com/gvisor/pkg/refs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
@@ -57,6 +58,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/limits"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/loader"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/mm"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/socket/netlink/port"
 	sentrytime "gvisor.googlesource.com/gvisor/pkg/sentry/time"
@@ -88,11 +90,13 @@ type Kernel struct {
 
 	// All of the following fields are immutable unless otherwise specified.
 
-	// Platform is the platform that is used to execute tasks in the
-	// created Kernel. It is embedded so that Kernel can directly serve as
-	// Platform in mm logic and also serve as platform.MemoryProvider in
-	// filemem S/R logic.
+	// Platform is the platform that is used to execute tasks in the created
+	// Kernel. See comment on pgalloc.MemoryFileProvider for why Platform is
+	// embedded anonymously (the same issue applies).
 	platform.Platform `state:"nosave"`
+
+	// mf provides application memory.
+	mf *pgalloc.MemoryFile `state:"nosave"`
 
 	// See InitKernelArgs for the meaning of these fields.
 	featureSet                  *cpuid.FeatureSet
@@ -164,7 +168,7 @@ type Kernel struct {
 	// nextInotifyCookie is a monotonically increasing counter used for
 	// generating unique inotify event cookies.
 	//
-	// nextInotifyCookie is mutable, and is accesed using atomic memory
+	// nextInotifyCookie is mutable, and is accessed using atomic memory
 	// operations.
 	nextInotifyCookie uint32
 
@@ -177,6 +181,13 @@ type Kernel struct {
 
 	// danglingEndpoints is used to save / restore tcpip.DanglingEndpoints.
 	danglingEndpoints struct{} `state:".([]tcpip.Endpoint)"`
+
+	// socketTable is used to track all sockets on the system. Protected by
+	// extMu.
+	socketTable map[int]map[*refs.WeakRef]struct{}
+
+	// deviceRegistry is used to save/restore device.SimpleDevices.
+	deviceRegistry struct{} `state:".(*device.Registry)"`
 }
 
 // InitKernelArgs holds arguments to Init.
@@ -224,7 +235,8 @@ type InitKernelArgs struct {
 
 // Init initialize the Kernel with no tasks.
 //
-// Callers must manually set Kernel.Platform before caling Init.
+// Callers must manually set Kernel.Platform and call Kernel.SetMemoryFile
+// before calling Init.
 func (k *Kernel) Init(args InitKernelArgs) error {
 	if args.FeatureSet == nil {
 		return fmt.Errorf("FeatureSet is nil")
@@ -266,6 +278,7 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 	k.monotonicClock = &timekeeperClock{tk: args.Timekeeper, c: sentrytime.Monotonic}
 	k.futexes = futex.NewManager()
 	k.netlinkPorts = port.New()
+	k.socketTable = make(map[int]map[*refs.WeakRef]struct{})
 
 	return nil
 }
@@ -326,15 +339,9 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 	log.Infof("Kernel save stats: %s", &stats)
 	log.Infof("Kernel save took [%s].", time.Since(kernelStart))
 
-	// Save the memory state.
-	//
-	// FIXME: In the future, this should not be dispatched via
-	// an abstract memory type. This should be dispatched to a single
-	// memory implementation that belongs to the kernel. (There is
-	// currently a single implementation anyways, it just needs to be
-	// "unabstracted" and reparented appropriately.)
+	// Save the memory file's state.
 	memoryStart := time.Now()
-	if err := k.Platform.Memory().SaveTo(w); err != nil {
+	if err := k.mf.SaveTo(w); err != nil {
 		return err
 	}
 	log.Infof("Memory save took [%s].", time.Since(memoryStart))
@@ -361,7 +368,15 @@ func (ts *TaskSet) flushWritesToFiles(ctx context.Context) error {
 				syncErr := desc.file.Fsync(ctx, 0, fs.FileMaxOffset, fs.SyncAll)
 				if err := fs.SaveFileFsyncError(syncErr); err != nil {
 					name, _ := desc.file.Dirent.FullName(nil /* root */)
-					return fmt.Errorf("%q was not sufficiently synced: %v", name, err)
+					// Wrap this error in ErrSaveRejection
+					// so that it will trigger a save
+					// error, rather than a panic. This
+					// also allows us to distinguish Fsync
+					// errors from state file errors in
+					// state.Save.
+					return fs.ErrSaveRejection{
+						Err: fmt.Errorf("%q was not sufficiently synced: %v", name, err),
+					}
 				}
 			}
 		}
@@ -412,13 +427,9 @@ func (ts *TaskSet) unregisterEpollWaiters() {
 }
 
 // LoadFrom returns a new Kernel loaded from args.
-func (k *Kernel) LoadFrom(r io.Reader, p platform.Platform, net inet.Stack) error {
+func (k *Kernel) LoadFrom(r io.Reader, net inet.Stack) error {
 	loadStart := time.Now()
-	if p == nil {
-		return fmt.Errorf("Platform is nil")
-	}
 
-	k.Platform = p
 	k.networkStack = net
 
 	initAppCores := k.applicationCores
@@ -432,11 +443,9 @@ func (k *Kernel) LoadFrom(r io.Reader, p platform.Platform, net inet.Stack) erro
 	log.Infof("Kernel load stats: %s", &stats)
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 
-	// Load the memory state.
-	//
-	// See the note in SaveTo.
+	// Load the memory file's state.
 	memoryStart := time.Now()
-	if err := k.Platform.Memory().LoadFrom(r); err != nil {
+	if err := k.mf.LoadFrom(r); err != nil {
 		return err
 	}
 	log.Infof("Memory load took [%s].", time.Since(memoryStart))
@@ -591,6 +600,10 @@ func (ctx *createProcessContext) Value(key interface{}) interface{} {
 		return ctx.k.RealtimeClock()
 	case limits.CtxLimits:
 		return ctx.args.Limits
+	case pgalloc.CtxMemoryFile:
+		return ctx.k.mf
+	case pgalloc.CtxMemoryFileProvider:
+		return ctx.k
 	case platform.CtxPlatform:
 		return ctx.k
 	case uniqueid.CtxGlobalUniqueID:
@@ -609,8 +622,11 @@ func (ctx *createProcessContext) Value(key interface{}) interface{} {
 // CreateProcess creates a new task in a new thread group with the given
 // options. The new task has no parent and is in the root PID namespace.
 //
-// If k.Start() has already been called, the created task will begin running
-// immediately. Otherwise, it will be started when k.Start() is called.
+// If k.Start() has already been called, then the created process must be
+// started by calling kernel.StartProcess(tg).
+//
+// If k.Start() has not yet been called, then the created task will begin
+// running when k.Start() is called.
 //
 // CreateProcess has no analogue in Linux; it is used to create the initial
 // application task, as well as processes started by the control server.
@@ -682,20 +698,23 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 		AbstractSocketNamespace: args.AbstractSocketNamespace,
 		ContainerID:             args.ContainerID,
 	}
-	t, err := k.tasks.NewTask(config)
-	if err != nil {
+	if _, err := k.tasks.NewTask(config); err != nil {
 		return nil, 0, err
 	}
 
 	// Success.
 	tgid := k.tasks.Root.IDOfThreadGroup(tg)
-	if k.started {
-		tid := k.tasks.Root.IDOfTask(t)
-		t.Start(tid)
-	} else if k.globalInit == nil {
+	if k.globalInit == nil {
 		k.globalInit = tg
 	}
 	return tg, tgid, nil
+}
+
+// StartProcess starts running a process that was created with CreateProcess.
+func (k *Kernel) StartProcess(tg *ThreadGroup) {
+	t := tg.Leader()
+	tid := k.tasks.Root.IDOfTask(t)
+	t.Start(tid)
 }
 
 // Start starts execution of all tasks in k.
@@ -847,36 +866,14 @@ func (k *Kernel) SendContainerSignal(cid string, info *arch.SignalInfo) error {
 	defer k.tasks.mu.RUnlock()
 
 	var lastErr error
-	for t := range k.tasks.Root.tids {
-		if t == t.tg.leader && t.ContainerID() == cid {
-			t.tg.signalHandlers.mu.Lock()
-			defer t.tg.signalHandlers.mu.Unlock()
+	for tg := range k.tasks.Root.tgids {
+		if tg.leader.ContainerID() == cid {
+			tg.signalHandlers.mu.Lock()
 			infoCopy := *info
-			if err := t.sendSignalLocked(&infoCopy, true /*group*/); err != nil {
+			if err := tg.leader.sendSignalLocked(&infoCopy, true /*group*/); err != nil {
 				lastErr = err
 			}
-		}
-	}
-	return lastErr
-}
-
-// SendProcessGroupSignal sends a signal to all processes inside the process
-// group. It is analagous to kernel/signal.c:kill_pgrp.
-func (k *Kernel) SendProcessGroupSignal(pg *ProcessGroup, info *arch.SignalInfo) error {
-	k.extMu.Lock()
-	defer k.extMu.Unlock()
-	k.tasks.mu.RLock()
-	defer k.tasks.mu.RUnlock()
-
-	var lastErr error
-	for t := range k.tasks.Root.tids {
-		if t == t.tg.leader && t.tg.ProcessGroup() == pg {
-			t.tg.signalHandlers.mu.Lock()
-			defer t.tg.signalHandlers.mu.Unlock()
-			infoCopy := *info
-			if err := t.sendSignalLocked(&infoCopy, true /*group*/); err != nil {
-				lastErr = err
-			}
+			tg.signalHandlers.mu.Unlock()
 		}
 	}
 	return lastErr
@@ -1028,6 +1025,17 @@ func (k *Kernel) NowMonotonic() int64 {
 	return now
 }
 
+// SetMemoryFile sets Kernel.mf. SetMemoryFile must be called before Init or
+// LoadFrom.
+func (k *Kernel) SetMemoryFile(mf *pgalloc.MemoryFile) {
+	k.mf = mf
+}
+
+// MemoryFile implements pgalloc.MemoryFileProvider.MemoryFile.
+func (k *Kernel) MemoryFile() *pgalloc.MemoryFile {
+	return k.mf
+}
+
 // SupervisorContext returns a Context with maximum privileges in k. It should
 // only be used by goroutines outside the control of the emulated kernel
 // defined by e.
@@ -1049,6 +1057,56 @@ func (k *Kernel) EmitUnimplementedEvent(ctx context.Context) {
 		Tid:       int32(t.ThreadID()),
 		Registers: t.Arch().StateData().Proto(),
 	})
+}
+
+// socketEntry represents a socket recorded in Kernel.socketTable. It implements
+// refs.WeakRefUser for sockets stored in the socket table.
+//
+// +stateify savable
+type socketEntry struct {
+	k      *Kernel
+	sock   *refs.WeakRef
+	family int
+}
+
+// WeakRefGone implements refs.WeakRefUser.WeakRefGone.
+func (s *socketEntry) WeakRefGone() {
+	s.k.extMu.Lock()
+	// k.socketTable is guaranteed to point to a valid socket table for s.family
+	// at this point, since we made sure of the fact when we created this
+	// socketEntry, and we never delete socket tables.
+	delete(s.k.socketTable[s.family], s.sock)
+	s.k.extMu.Unlock()
+}
+
+// RecordSocket adds a socket to the system-wide socket table for tracking.
+//
+// Precondition: Caller must hold a reference to sock.
+func (k *Kernel) RecordSocket(sock *fs.File, family int) {
+	k.extMu.Lock()
+	table, ok := k.socketTable[family]
+	if !ok {
+		table = make(map[*refs.WeakRef]struct{})
+		k.socketTable[family] = table
+	}
+	se := socketEntry{k: k, family: family}
+	se.sock = refs.NewWeakRef(sock, &se)
+	table[se.sock] = struct{}{}
+	k.extMu.Unlock()
+}
+
+// ListSockets returns a snapshot of all sockets of a given family.
+func (k *Kernel) ListSockets(family int) []*refs.WeakRef {
+	k.extMu.Lock()
+	socks := []*refs.WeakRef{}
+	if table, ok := k.socketTable[family]; ok {
+		socks = make([]*refs.WeakRef, 0, len(table))
+		for s := range table {
+			socks = append(socks, s)
+		}
+	}
+	k.extMu.Unlock()
+	return socks
 }
 
 type supervisorContext struct {
@@ -1083,6 +1141,10 @@ func (ctx supervisorContext) Value(key interface{}) interface{} {
 	case limits.CtxLimits:
 		// No limits apply.
 		return limits.NewLimitSet()
+	case pgalloc.CtxMemoryFile:
+		return ctx.k.mf
+	case pgalloc.CtxMemoryFileProvider:
+		return ctx.k
 	case platform.CtxPlatform:
 		return ctx.k
 	case uniqueid.CtxGlobalUniqueID:

@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
@@ -73,6 +73,8 @@ go_test(
         "tcp_test.go",
         "tcp_timestamp_test.go",
     ],
+    # FIXME
+    tags = ["flaky"],
     deps = [
         ":tcp",
         "//pkg/tcpip",

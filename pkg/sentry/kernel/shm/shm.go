@@ -45,6 +45,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
 	ktime "gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
@@ -199,19 +200,19 @@ func (r *Registry) FindOrCreate(ctx context.Context, pid int32, key Key, size ui
 //
 // Precondition: Caller must hold r.mu.
 func (r *Registry) newShm(ctx context.Context, pid int32, key Key, creator fs.FileOwner, perms fs.FilePermissions, size uint64) (*Shm, error) {
-	p := platform.FromContext(ctx)
-	if p == nil {
-		panic(fmt.Sprintf("context.Context %T lacks non-nil value for key %T", ctx, platform.CtxPlatform))
+	mfp := pgalloc.MemoryFileProviderFromContext(ctx)
+	if mfp == nil {
+		panic(fmt.Sprintf("context.Context %T lacks non-nil value for key %T", ctx, pgalloc.CtxMemoryFileProvider))
 	}
 
 	effectiveSize := uint64(usermem.Addr(size).MustRoundUp())
-	fr, err := p.Memory().Allocate(effectiveSize, usage.Anonymous)
+	fr, err := mfp.MemoryFile().Allocate(effectiveSize, usage.Anonymous)
 	if err != nil {
 		return nil, err
 	}
 
 	shm := &Shm{
-		p:             p,
+		mfp:           mfp,
 		registry:      r,
 		creator:       creator,
 		size:          size,
@@ -285,7 +286,7 @@ func (r *Registry) remove(s *Shm) {
 	defer s.mu.Unlock()
 
 	if s.key != linux.IPC_PRIVATE {
-		panic(fmt.Sprintf("Attempted to remove shm segment %+v from the registry whose key is still associated", s))
+		panic(fmt.Sprintf("Attempted to remove %s from the registry whose key is still associated", s.debugLocked()))
 	}
 
 	delete(r.shms, s.ID)
@@ -312,7 +313,7 @@ type Shm struct {
 	// destruction.
 	refs.AtomicRefCount
 
-	p platform.Platform
+	mfp pgalloc.MemoryFileProvider
 
 	// registry points to the shm registry containing this segment. Immutable.
 	registry *Registry
@@ -333,7 +334,7 @@ type Shm struct {
 	// Invariant: effectiveSize must be a multiple of usermem.PageSize.
 	effectiveSize uint64
 
-	// fr is the offset into platform.Memory() that backs this contents of this
+	// fr is the offset into mfp.MemoryFile() that backs this contents of this
 	// segment. Immutable.
 	fr platform.FileRange
 
@@ -367,6 +368,12 @@ type Shm struct {
 	// in the registry and can no longer be attached. When the last user
 	// detaches from the segment, it is destroyed.
 	pendingDestruction bool
+}
+
+// Precondition: Caller must hold s.mu.
+func (s *Shm) debugLocked() string {
+	return fmt.Sprintf("Shm{id: %d, key: %d, size: %d bytes, refs: %d, destroyed: %v}",
+		s.ID, s.key, s.size, s.ReadRefs(), s.pendingDestruction)
 }
 
 // MappedName implements memmap.MappingIdentity.MappedName.
@@ -411,7 +418,7 @@ func (s *Shm) AddMapping(ctx context.Context, _ memmap.MappingSpace, _ usermem.A
 	} else {
 		// AddMapping is called during a syscall, so ctx should always be a task
 		// context.
-		log.Warningf("Adding mapping to shm %+v but couldn't get the current pid; not updating the last attach pid", s)
+		log.Warningf("Adding mapping to %s but couldn't get the current pid; not updating the last attach pid", s.debugLocked())
 	}
 	return nil
 }
@@ -433,7 +440,7 @@ func (s *Shm) RemoveMapping(ctx context.Context, _ memmap.MappingSpace, _ userme
 	if pid, ok := context.ThreadGroupIDFromContext(ctx); ok {
 		s.lastAttachDetachPID = pid
 	} else {
-		log.Debugf("Couldn't obtain pid when removing mapping to shm %+v, not updating the last detach pid.", s)
+		log.Debugf("Couldn't obtain pid when removing mapping to %s, not updating the last detach pid.", s.debugLocked())
 	}
 }
 
@@ -452,8 +459,9 @@ func (s *Shm) Translate(ctx context.Context, required, optional memmap.MappableR
 		return []memmap.Translation{
 			{
 				Source: source,
-				File:   s.p.Memory(),
+				File:   s.mfp.MemoryFile(),
 				Offset: s.fr.Start + source.Start,
+				Perms:  usermem.AnyAccess,
 			},
 		}, err
 	}
@@ -599,7 +607,7 @@ func (s *Shm) Set(ctx context.Context, ds *linux.ShmidDS) error {
 }
 
 func (s *Shm) destroy() {
-	s.p.Memory().DecRef(s.fr)
+	s.mfp.MemoryFile().DecRef(s.fr)
 	s.registry.remove(s)
 }
 

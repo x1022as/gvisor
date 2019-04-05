@@ -1,7 +1,7 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_binary")
 load("//test/syscalls:build_defs.bzl", "syscall_test")
 
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 syscall_test(test = "//test/syscalls/linux:32bit_test")
 
@@ -9,7 +9,7 @@ syscall_test(test = "//test/syscalls/linux:accept_bind_stream_test")
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:accept_bind_test",
 )
 
@@ -42,13 +42,17 @@ syscall_test(test = "//test/syscalls/linux:chmod_test")
 syscall_test(
     size = "medium",
     test = "//test/syscalls/linux:chown_test",
+    use_tmpfs = True,  # chwon tests require gofer to be running as root.
 )
 
 syscall_test(test = "//test/syscalls/linux:chroot_test")
 
 syscall_test(test = "//test/syscalls/linux:clock_getres_test")
 
-syscall_test(test = "//test/syscalls/linux:clock_gettime_test")
+syscall_test(
+    size = "medium",
+    test = "//test/syscalls/linux:clock_gettime_test",
+)
 
 syscall_test(test = "//test/syscalls/linux:clock_nanosleep_test")
 
@@ -106,7 +110,7 @@ syscall_test(test = "//test/syscalls/linux:fsync_test")
 
 syscall_test(
     size = "medium",
-    shard_count = 20,
+    shard_count = 5,
     test = "//test/syscalls/linux:futex_test",
 )
 
@@ -137,7 +141,10 @@ syscall_test(
 
 syscall_test(test = "//test/syscalls/linux:kill_test")
 
-syscall_test(test = "//test/syscalls/linux:link_test")
+syscall_test(
+    test = "//test/syscalls/linux:link_test",
+    use_tmpfs = True,  # gofer needs CAP_DAC_READ_SEARCH to use AT_EMPTY_PATH with linkat(2)
+)
 
 syscall_test(test = "//test/syscalls/linux:lseek_test")
 
@@ -151,11 +158,14 @@ syscall_test(test = "//test/syscalls/linux:mincore_test")
 
 syscall_test(test = "//test/syscalls/linux:mkdir_test")
 
-syscall_test(test = "//test/syscalls/linux:mknod_test")
+syscall_test(
+    test = "//test/syscalls/linux:mknod_test",
+    use_tmpfs = True,  # mknod is not supported over gofer.
+)
 
 syscall_test(
     size = "medium",
-    shard_count = 10,
+    shard_count = 5,
     test = "//test/syscalls/linux:mmap_test",
 )
 
@@ -207,6 +217,8 @@ syscall_test(
     test = "//test/syscalls/linux:proc_test",
 )
 
+syscall_test(test = "//test/syscalls/linux:proc_pid_uid_gid_map_test")
+
 syscall_test(
     size = "medium",
     test = "//test/syscalls/linux:pselect_test",
@@ -222,6 +234,8 @@ syscall_test(
 syscall_test(test = "//test/syscalls/linux:pwritev2_test")
 
 syscall_test(test = "//test/syscalls/linux:pwrite64_test")
+
+syscall_test(test = "//test/syscalls/linux:raw_socket_ipv4_test")
 
 syscall_test(test = "//test/syscalls/linux:read_test")
 
@@ -289,7 +303,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_abstract_test",
 )
 
@@ -300,7 +314,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_domain_test",
 )
 
@@ -311,7 +325,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_filesystem_test",
 )
 
@@ -322,7 +336,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_ip_tcp_generic_loopback_test",
 )
 
@@ -333,13 +347,13 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_ip_tcp_loopback_test",
 )
 
 syscall_test(
     size = "medium",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_ip_tcp_udp_generic_loopback_test",
 )
 
@@ -350,8 +364,15 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_ip_udp_loopback_test",
+)
+
+syscall_test(
+    size = "medium",
+    # Multicast packets can be received by the wrong test if run in parallel.
+    parallel = False,
+    test = "//test/syscalls/linux:socket_ipv4_udp_unbound_loopback_test",
 )
 
 syscall_test(test = "//test/syscalls/linux:socket_netdevice_test")
@@ -388,7 +409,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_unix_abstract_test",
 )
 
@@ -405,13 +426,13 @@ syscall_test(
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_unix_filesystem_test",
 )
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_unix_pair_test",
 )
 
@@ -443,13 +464,13 @@ syscall_test(
 
 syscall_test(
     size = "medium",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_unix_unbound_seqpacket_test",
 )
 
 syscall_test(
     size = "large",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_unix_unbound_stream_test",
 )
 
@@ -475,7 +496,7 @@ syscall_test(test = "//test/syscalls/linux:sysret_test")
 
 syscall_test(
     size = "medium",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:tcp_socket_test",
 )
 
@@ -495,7 +516,7 @@ syscall_test(test = "//test/syscalls/linux:udp_bind_test")
 
 syscall_test(
     size = "medium",
-    shard_count = 50,
+    shard_count = 10,
     test = "//test/syscalls/linux:udp_socket_test",
 )
 
@@ -527,6 +548,13 @@ syscall_test(
 
 syscall_test(test = "//test/syscalls/linux:write_test")
 
+syscall_test(
+    test = "//test/syscalls/linux:proc_net_unix_test",
+    # Unix domain socket creation isn't supported on all file systems. The
+    # sentry-internal tmpfs is known to support it.
+    use_tmpfs = True,
+)
+
 go_binary(
     name = "syscall_test_runner",
     srcs = ["syscall_test_runner.go"],
@@ -538,6 +566,7 @@ go_binary(
         "//runsc/specutils",
         "//runsc/test/testutil",
         "//test/syscalls/gtest",
+        "@com_github_opencontainers_runtime-spec//specs-go:go_default_library",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

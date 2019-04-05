@@ -33,8 +33,6 @@ readonly RUNTIME="runsc_test_$((RANDOM))"
 
 # Packages that will be built and tested.
 readonly BUILD_PACKAGES=("//...")
-# TODO: Include syscall tests in "test" directory once all tests
-# pass on RBE.
 readonly TEST_PACKAGES=("//pkg/..." "//runsc/..." "//tools/...")
 
 #######################
@@ -45,6 +43,9 @@ readonly TEST_PACKAGES=("//pkg/..." "//runsc/..." "//tools/...")
 use_bazel.sh latest
 which bazel
 bazel version
+
+# Load the kvm module
+sudo -n -E modprobe kvm
 
 # Bazel start-up flags for RBE.
 BAZEL_RBE_FLAGS=(
@@ -73,17 +74,18 @@ BAZEL_BUILD_RBE_FLAGS=(
 ####################
 
 build_everything() {
+  FLAVOR="${1}"
+
   cd ${WORKSPACE_DIR}
   bazel \
     "${BAZEL_RBE_FLAGS[@]}" \
     build \
-    "${BAZEL_BUILD_RBE_FLAGS[@]}" \
+    -c "${FLAVOR}" "${BAZEL_BUILD_RBE_FLAGS[@]}" \
     "${BUILD_PACKAGES[@]}"
 }
 
 # Run simple tests runs the tests that require no special setup or
 # configuration.
-# TODO: Use RBE here once tests pass with RBE.
 run_simple_tests() {
   cd ${WORKSPACE_DIR}
   bazel \
@@ -100,16 +102,12 @@ install_runtime() {
 # Install dependencies for the crictl tests.
 install_crictl_test_deps() {
   # Install containerd.
-  # libseccomp2 needs to be downgraded in order to install libseccomp-dev.
-  sudo -n -E apt-get install -y --force-yes libseccomp2=2.1.1-1ubuntu1~trusty4
+  sudo -n -E apt-get update
   sudo -n -E apt-get install -y btrfs-tools libseccomp-dev
   # go get will exit with a status of 1 despite succeeding, so ignore errors.
   go get -d github.com/containerd/containerd || true
   cd ${GOPATH}/src/github.com/containerd/containerd
-  # TODO: Switch to using a tagged version once one has been cut
-  # that contains fix in:
-  # https://github.com/containerd/containerd/commit/52de3717005eb20141c305bd93ff0d6ee5dfecb6
-  git checkout master
+  git checkout v1.2.2
   make
   sudo -n -E make install
 
@@ -177,17 +175,24 @@ run_root_tests() {
   sudo -n -E RUNSC_RUNTIME="${RUNTIME}" RUNSC_EXEC=/tmp/"${RUNTIME}"/runsc ${root_test}
 }
 
+# Run syscall unit tests.
+run_syscall_tests() {
+  cd ${WORKSPACE_DIR}
+  bazel \
+    "${BAZEL_RBE_FLAGS[@]}" \
+    test "${BAZEL_BUILD_RBE_FLAGS[@]}" \
+    --test_tag_filters=runsc_ptrace //test/syscalls/...
+}
+
 # Find and rename all test xml and log files so that Sponge can pick them up.
 # XML files must be named sponge_log.xml, and log files must be named
 # sponge_log.log. We move all such files into KOKORO_ARTIFACTS_DIR, in a
 # subdirectory named with the test name.
 upload_test_artifacts() {
   cd ${WORKSPACE_DIR}
-  for file in $(find -L "bazel-testlogs" -name "test.xml" -o -name "test.log"); do
-      newpath=${KOKORO_ARTIFACTS_DIR}/$(dirname ${file})
-      extension="${file##*.}"
-      mkdir -p "${newpath}" && cp "${file}" "${newpath}/sponge_log.${extension}"
-  done
+  find -L "bazel-testlogs" -name "test.xml" -o -name "test.log" -o -name "outputs.zip" |
+    tar --create --files-from - --transform 's/test\./sponge_log./' |
+    tar --extract --directory ${KOKORO_ARTIFACTS_DIR}
 }
 
 # Finish runs at exit, even in the event of an error, and uploads all test
@@ -208,7 +213,7 @@ main() {
   trap finish EXIT
 
   # Build and run the simple tests.
-  build_everything
+  build_everything opt
   run_simple_tests
 
   # So far so good. Install more deps and run the integration tests.
@@ -216,6 +221,11 @@ main() {
   install_crictl_test_deps
   run_docker_tests
   run_root_tests
+
+  run_syscall_tests
+
+  # Build other flavors too.
+  build_everything dbg
 
   # No need to call "finish" here, it will happen at exit.
 }

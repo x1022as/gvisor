@@ -17,6 +17,7 @@ package kernel
 import (
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/refs"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
 
@@ -119,6 +120,13 @@ func (pg *ProcessGroup) Originator() *ThreadGroup {
 	return pg.originator
 }
 
+// IsOrphan returns true if this process group is an orphan.
+func (pg *ProcessGroup) IsOrphan() bool {
+	pg.originator.TaskSet().mu.RLock()
+	defer pg.originator.TaskSet().mu.RUnlock()
+	return pg.ancestors == 0
+}
+
 // incRefWithParent grabs a reference.
 //
 // This function is called when this ProcessGroup is being associated with some
@@ -196,7 +204,7 @@ func (pg *ProcessGroup) handleOrphan() {
 			return
 		}
 		tg.signalHandlers.mu.Lock()
-		if tg.groupStopPhase == groupStopComplete {
+		if tg.groupStopComplete {
 			hasStopped = true
 		}
 		tg.signalHandlers.mu.Unlock()
@@ -224,6 +232,27 @@ func (pg *ProcessGroup) Session() *Session {
 	return pg.session
 }
 
+// SendSignal sends a signal to all processes inside the process group. It is
+// analagous to kernel/signal.c:kill_pgrp.
+func (pg *ProcessGroup) SendSignal(info *arch.SignalInfo) error {
+	tasks := pg.originator.TaskSet()
+	tasks.mu.RLock()
+	defer tasks.mu.RUnlock()
+
+	var lastErr error
+	for tg := range tasks.Root.tgids {
+		if tg.ProcessGroup() == pg {
+			tg.signalHandlers.mu.Lock()
+			infoCopy := *info
+			if err := tg.leader.sendSignalLocked(&infoCopy, true /*group*/); err != nil {
+				lastErr = err
+			}
+			tg.signalHandlers.mu.Unlock()
+		}
+	}
+	return lastErr
+}
+
 // CreateSession creates a new Session, with the ThreadGroup as the leader.
 //
 // EPERM may be returned if either the given ThreadGroup is already a Session
@@ -239,7 +268,7 @@ func (tg *ThreadGroup) CreateSession() error {
 // Precondition: callers must hold TaskSet.mu for writing.
 func (tg *ThreadGroup) createSession() error {
 	// Get the ID for this thread in the current namespace.
-	id := tg.pidns.tids[tg.leader]
+	id := tg.pidns.tgids[tg]
 
 	// Check if this ThreadGroup already leads a Session, or
 	// if the proposed group is already taken.
@@ -308,7 +337,7 @@ func (tg *ThreadGroup) createSession() error {
 
 	// Ensure a translation is added to all namespaces.
 	for ns := tg.pidns; ns != nil; ns = ns.parent {
-		local := ns.tids[tg.leader]
+		local := ns.tgids[tg]
 		ns.sids[s] = SessionID(local)
 		ns.sessions[SessionID(local)] = s
 		ns.pgids[pg] = ProcessGroupID(local)
@@ -327,7 +356,7 @@ func (tg *ThreadGroup) CreateProcessGroup() error {
 	defer tg.pidns.owner.mu.Unlock()
 
 	// Get the ID for this thread in the current namespace.
-	id := tg.pidns.tids[tg.leader]
+	id := tg.pidns.tgids[tg]
 
 	// Per above, check for a Session leader or existing group.
 	for s := tg.pidns.owner.sessions.Front(); s != nil; s = s.Next() {
@@ -372,7 +401,7 @@ func (tg *ThreadGroup) CreateProcessGroup() error {
 
 	// Ensure this translation is added to all namespaces.
 	for ns := tg.pidns; ns != nil; ns = ns.parent {
-		local := ns.tids[tg.leader]
+		local := ns.tgids[tg]
 		ns.pgids[pg] = ProcessGroupID(local)
 		ns.processGroups[ProcessGroupID(local)] = pg
 	}

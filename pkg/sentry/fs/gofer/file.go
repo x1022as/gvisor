@@ -17,6 +17,7 @@ package gofer
 import (
 	"fmt"
 	"syscall"
+	"time"
 
 	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/metric"
@@ -31,13 +32,21 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/waiter"
 )
 
-var openedWX = metric.MustCreateNewUint64Metric("/gofer/opened_write_execute_file", true /* sync */, "Number of times a writable+executable file was opened from a gofer.")
+var (
+	opensWX      = metric.MustCreateNewUint64Metric("/gofer/opened_write_execute_file", true /* sync */, "Number of times a writable+executable file was opened from a gofer.")
+	opens9P      = metric.MustCreateNewUint64Metric("/gofer/opens_9p", false /* sync */, "Number of times a 9P file was opened from a gofer.")
+	opensHost    = metric.MustCreateNewUint64Metric("/gofer/opens_host", false /* sync */, "Number of times a host file was opened from a gofer.")
+	reads9P      = metric.MustCreateNewUint64Metric("/gofer/reads_9p", false /* sync */, "Number of 9P file reads from a gofer.")
+	readWait9P   = metric.MustCreateNewUint64Metric("/gofer/read_wait_9p", false /* sync */, "Time waiting on 9P file reads from a gofer, in nanoseconds.")
+	readsHost    = metric.MustCreateNewUint64Metric("/gofer/reads_host", false /* sync */, "Number of host file reads from a gofer.")
+	readWaitHost = metric.MustCreateNewUint64Metric("/gofer/read_wait_host", false /* sync */, "Time waiting on host file reads from a gofer, in nanoseconds.")
+)
 
 // fileOperations implements fs.FileOperations for a remote file system.
 //
 // +stateify savable
 type fileOperations struct {
-	fsutil.NoIoctl     `state:"nosave"`
+	fsutil.FileNoIoctl `state:"nosave"`
 	waiter.AlwaysReady `state:"nosave"`
 
 	// inodeOperations is the inodeOperations backing the file. It is protected
@@ -91,9 +100,14 @@ func NewFile(ctx context.Context, dirent *fs.Dirent, name string, flags fs.FileF
 	}
 	if flags.Write {
 		if err := dirent.Inode.CheckPermission(ctx, fs.PermMask{Execute: true}); err == nil {
-			openedWX.Increment()
+			opensWX.Increment()
 			log.Warningf("Opened a writable executable: %q", name)
 		}
+	}
+	if handles.Host != nil {
+		opensHost.Increment()
+	} else {
+		opens9P.Increment()
 	}
 	return fs.NewFile(ctx, dirent, flags, f)
 }
@@ -204,7 +218,7 @@ func (f *fileOperations) Write(ctx context.Context, file *fs.File, src usermem.I
 		return 0, syserror.EISDIR
 	}
 	cp := f.inodeOperations.session().cachePolicy
-	if cp.usePageCache(file.Dirent.Inode) {
+	if cp.useCachingInodeOps(file.Dirent.Inode) {
 		n, err := f.inodeOperations.cachingInodeOps.Write(ctx, src, offset)
 		if err != nil {
 			return n, err
@@ -215,20 +229,44 @@ func (f *fileOperations) Write(ctx context.Context, file *fs.File, src usermem.I
 		}
 		return n, err
 	}
+	if f.inodeOperations.fileState.hostMappable != nil {
+		return f.inodeOperations.fileState.hostMappable.Write(ctx, src, offset)
+	}
 	return src.CopyInTo(ctx, f.handles.readWriterAt(ctx, offset))
+}
+
+// incrementReadCounters increments the read counters for the read starting at the given time. We
+// use this function rather than using a defer in Read() to avoid the performance hit of defer.
+func (f *fileOperations) incrementReadCounters(start time.Time) {
+	if f.handles.Host != nil {
+		readsHost.Increment()
+		fs.IncrementWait(readWaitHost, start)
+	} else {
+		reads9P.Increment()
+		fs.IncrementWait(readWait9P, start)
+	}
 }
 
 // Read implements fs.FileOperations.Read.
 func (f *fileOperations) Read(ctx context.Context, file *fs.File, dst usermem.IOSequence, offset int64) (int64, error) {
+	var start time.Time
+	if fs.RecordWaitTime {
+		start = time.Now()
+	}
 	if fs.IsDir(file.Dirent.Inode.StableAttr) {
 		// Not all remote file systems enforce this so this client does.
+		f.incrementReadCounters(start)
 		return 0, syserror.EISDIR
 	}
 
-	if f.inodeOperations.session().cachePolicy.usePageCache(file.Dirent.Inode) {
-		return f.inodeOperations.cachingInodeOps.Read(ctx, file, dst, offset)
+	if f.inodeOperations.session().cachePolicy.useCachingInodeOps(file.Dirent.Inode) {
+		n, err := f.inodeOperations.cachingInodeOps.Read(ctx, file, dst, offset)
+		f.incrementReadCounters(start)
+		return n, err
 	}
-	return dst.CopyOutFrom(ctx, f.handles.readWriterAt(ctx, offset))
+	n, err := dst.CopyOutFrom(ctx, f.handles.readWriterAt(ctx, offset))
+	f.incrementReadCounters(start)
+	return n, err
 }
 
 // Fsync implements fs.FileOperations.Fsync.
@@ -267,10 +305,7 @@ func (f *fileOperations) Flush(ctx context.Context, file *fs.File) error {
 
 // ConfigureMMap implements fs.FileOperations.ConfigureMMap.
 func (f *fileOperations) ConfigureMMap(ctx context.Context, file *fs.File, opts *memmap.MMapOpts) error {
-	if !f.inodeOperations.session().cachePolicy.usePageCache(file.Dirent.Inode) {
-		return syserror.ENODEV
-	}
-	return fsutil.GenericConfigureMMap(file, f.inodeOperations.cachingInodeOps, opts)
+	return f.inodeOperations.configureMMap(file, opts)
 }
 
 // Seek implements fs.FileOperations.Seek.

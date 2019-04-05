@@ -29,12 +29,13 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/sched"
 	ktime "gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/limits"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/unimpl"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/uniqueid"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
-	ssync "gvisor.googlesource.com/gvisor/pkg/sync"
+	"gvisor.googlesource.com/gvisor/third_party/gvsync"
 )
 
 // Task represents a thread of execution in the untrusted app.  It
@@ -81,7 +82,7 @@ type Task struct {
 	//
 	// gosched is protected by goschedSeq. gosched is owned by the task
 	// goroutine.
-	goschedSeq ssync.SeqCount `state:"nosave"`
+	goschedSeq gvsync.SeqCount `state:"nosave"`
 	gosched    TaskGoroutineSchedInfo
 
 	// yieldCount is the number of times the task goroutine has called
@@ -132,27 +133,41 @@ type Task struct {
 	// signalStack is exclusive to the task goroutine.
 	signalStack arch.SignalStack
 
-	// If groupStopRequired is true, the task should enter a group stop in the
-	// interrupt path. groupStopRequired is not redundant with
-	// tg.groupStopPhase != groupStopNone, because ptrace allows tracers to
-	// resume individual tasks from a group stop without ending the group stop
-	// as a whole.
+	// If groupStopPending is true, the task should participate in a group
+	// stop in the interrupt path.
 	//
-	// groupStopRequired is analogous to JOBCTL_TRAP_STOP in Linux, except that
-	// Linux only uses that flag for ptraced tasks.
+	// groupStopPending is analogous to JOBCTL_STOP_PENDING in Linux.
 	//
-	// groupStopRequired is protected by the signal mutex.
-	groupStopRequired bool
+	// groupStopPending is protected by the signal mutex.
+	groupStopPending bool
 
 	// If groupStopAcknowledged is true, the task has already acknowledged that
 	// it is entering the most recent group stop that has been initiated on its
-	// thread group. groupStopAcknowledged is only meaningful if
-	// tg.groupStopPhase == groupStopInitiated.
+	// thread group.
 	//
 	// groupStopAcknowledged is analogous to !JOBCTL_STOP_CONSUME in Linux.
 	//
 	// groupStopAcknowledged is protected by the signal mutex.
 	groupStopAcknowledged bool
+
+	// If trapStopPending is true, the task goroutine should enter a
+	// PTRACE_INTERRUPT-induced stop from the interrupt path.
+	//
+	// trapStopPending is analogous to JOBCTL_TRAP_STOP in Linux, except that
+	// Linux also sets JOBCTL_TRAP_STOP when a ptraced task detects
+	// JOBCTL_STOP_PENDING.
+	//
+	// trapStopPending is protected by the signal mutex.
+	trapStopPending bool
+
+	// If trapNotifyPending is true, this task is PTRACE_SEIZEd, and a group
+	// stop has begun or ended since the last time the task entered a
+	// ptrace-stop from the group-stop path.
+	//
+	// trapNotifyPending is analogous to JOBCTL_TRAP_NOTIFY in Linux.
+	//
+	// trapNotifyPending is protected by the signal mutex.
+	trapNotifyPending bool
 
 	// If stop is not nil, it is the internally-initiated condition that
 	// currently prevents the task goroutine from running.
@@ -294,6 +309,12 @@ type Task struct {
 	//
 	// ptraceTracees is protected by the TaskSet mutex.
 	ptraceTracees map[*Task]struct{}
+
+	// ptraceSeized is true if ptraceTracer attached to this task with
+	// PTRACE_SEIZE.
+	//
+	// ptraceSeized is protected by the TaskSet mutex.
+	ptraceSeized bool
 
 	// ptraceOpts contains ptrace options explicitly set by the tracer. If
 	// ptraceTracer is nil, ptraceOpts is expected to be the zero value.
@@ -529,17 +550,16 @@ func (t *Task) afterLoad() {
 	t.futexWaiter = futex.NewWaiter()
 }
 
-// copyScratchBufferLen is the length of the copyScratchBuffer field of the Task
-// struct.
-const copyScratchBufferLen = 52
+// copyScratchBufferLen is the length of Task.copyScratchBuffer.
+const copyScratchBufferLen = 144 // sizeof(struct stat)
 
 // CopyScratchBuffer returns a scratch buffer to be used in CopyIn/CopyOut
 // functions. It must only be used within those functions and can only be used
 // by the task goroutine; it exists to improve performance and thus
 // intentionally lacks any synchronization.
 //
-// Callers should pass a constant value as an argument, which will allow the
-// compiler to inline and optimize out the if statement below.
+// Callers should pass a constant value as an argument if possible, which will
+// allow the compiler to inline and optimize out the if statement below.
 func (t *Task) CopyScratchBuffer(size int) []byte {
 	if size > copyScratchBufferLen {
 		return make([]byte, size)
@@ -587,6 +607,10 @@ func (t *Task) Value(key interface{}) interface{} {
 		return t.k.RealtimeClock()
 	case limits.CtxLimits:
 		return t.tg.limits
+	case pgalloc.CtxMemoryFile:
+		return t.k.mf
+	case pgalloc.CtxMemoryFileProvider:
+		return t.k
 	case platform.CtxPlatform:
 		return t.k
 	case uniqueid.CtxGlobalUniqueID:

@@ -334,6 +334,11 @@ int ReadlinkWhileExited(std::string const& basename, char* buf, size_t count) {
   return ret;
 }
 
+TEST(ProcTest, NotFoundInRoot) {
+  struct stat s;
+  EXPECT_THAT(stat("/proc/foobar", &s), SyscallFailsWithErrno(ENOENT));
+}
+
 TEST(ProcSelfTest, IsThreadGroupLeader) {
   ScopedThread([] {
     const pid_t tgid = getpid();
@@ -875,6 +880,14 @@ TEST_P(ProcPidStatTest, HasBasicFields) {
   EXPECT_EQ("R", fields[2]);  // task state
   EXPECT_EQ(absl::StrCat(getppid()), fields[3]);
 
+  // If the test starts up quickly, then the process start time and the kernel
+  // boot time will be very close, and the proc starttime field (which is the
+  // delta of the two times) will be 0.  For that unfortunate reason, we can
+  // only check that starttime >= 0, and not that it is strictly > 0.
+  uint64_t starttime;
+  ASSERT_TRUE(absl::SimpleAtoi(fields[21], &starttime));
+  EXPECT_GE(starttime, 0);
+
   uint64_t vss;
   ASSERT_TRUE(absl::SimpleAtoi(fields[22], &vss));
   EXPECT_GT(vss, 0);
@@ -882,6 +895,10 @@ TEST_P(ProcPidStatTest, HasBasicFields) {
   uint64_t rss;
   ASSERT_TRUE(absl::SimpleAtoi(fields[23], &rss));
   EXPECT_GT(rss, 0);
+
+  uint64_t rsslim;
+  ASSERT_TRUE(absl::SimpleAtoi(fields[24], &rsslim));
+  EXPECT_GT(rsslim, 0);
 }
 
 INSTANTIATE_TEST_CASE_P(SelfAndNumericPid, ProcPidStatTest,
@@ -1253,6 +1270,7 @@ TEST(ProcPidSymlink, SubprocessRunning) {
   EXPECT_THAT(ReadlinkWhileRunning("ns/user", buf, sizeof(buf)),
               SyscallSucceedsWithValue(sizeof(buf)));
 }
+
 // FIXME: Inconsistent behavior between gVisor and linux
 // on proc files.
 TEST(ProcPidSymlink, SubprocessZombied) {
@@ -1357,6 +1375,7 @@ TEST(ProcPidFile, SubprocessRunning) {
 // Test whether /proc/PID/ files can be read for a zombie process.
 TEST(ProcPidFile, SubprocessZombie) {
   char buf[1];
+
   // 4.17: Succeeds and returns 1
   // gVisor: Succeds and returns 0
   EXPECT_THAT(ReadWhileZombied("auxv", buf, sizeof(buf)), SyscallSucceeds());

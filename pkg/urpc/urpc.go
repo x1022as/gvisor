@@ -29,6 +29,7 @@ import (
 	"runtime"
 	"sync"
 
+	"gvisor.googlesource.com/gvisor/pkg/fd"
 	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/unet"
 )
@@ -69,6 +70,11 @@ func (r RemoteError) Error() string {
 // because the urpc package defines pointer methods on FilePayload.
 type FilePayload struct {
 	Files []*os.File `json:"-"`
+}
+
+// ReleaseFD releases the indexth FD.
+func (f *FilePayload) ReleaseFD(index int) (*fd.FD, error) {
+	return fd.NewFromFile(f.Files[index])
 }
 
 // filePayload returns the file. It may be nil.
@@ -169,13 +175,23 @@ type Server struct {
 
 	// wg is a wait group for all outstanding clients.
 	wg sync.WaitGroup
+
+	// afterRPCCallback is called after each RPC is successfully completed.
+	afterRPCCallback func()
 }
 
 // NewServer returns a new server.
 func NewServer() *Server {
+	return NewServerWithCallback(nil)
+}
+
+// NewServerWithCallback returns a new server, who upon completion of each RPC
+// calls the given function.
+func NewServerWithCallback(afterRPCCallback func()) *Server {
 	return &Server{
-		methods: make(map[string]registeredMethod),
-		clients: make(map[*unet.Socket]clientState),
+		methods:          make(map[string]registeredMethod),
+		clients:          make(map[*unet.Socket]clientState),
+		afterRPCCallback: afterRPCCallback,
 	}
 }
 
@@ -267,6 +283,17 @@ func (s *Server) handleOne(client *unet.Socket) error {
 		// Client is dead.
 		return err
 	}
+
+	defer func() {
+		if s.afterRPCCallback != nil {
+			s.afterRPCCallback()
+		}
+	}()
+	// Explicitly close all these files after the call.
+	//
+	// This is also explicitly a reference to the files after the call,
+	// which means they are kept open for the duration of the call.
+	defer closeAll(newFs)
 
 	// Start the request.
 	if !s.clientBeginRequest(client) {

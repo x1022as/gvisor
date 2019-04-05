@@ -62,12 +62,14 @@ TEST_P(BlockingStreamSocketPairTest, BlockPartialWriteClosed) {
     });
 
     // Leave time for write to become blocked.
-    absl::SleepFor(absl::Seconds(1.0));
+    absl::SleepFor(absl::Seconds(1));
 
     ASSERT_THAT(close(sockets->release_second_fd()), SyscallSucceeds());
 }
 
-TEST_P(BlockingStreamSocketPairTest, SendMsgTooLarge) {
+// Random save may interrupt the call to sendmsg() in SendLargeSendMsg(),
+// causing the write to be incomplete and the test to hang.
+TEST_P(BlockingStreamSocketPairTest, SendMsgTooLarge_NoRandomSave) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 
   int sndbuf;
@@ -98,7 +100,10 @@ TEST_P(BlockingStreamSocketPairTest, RecvLessThanBuffer) {
               SyscallSucceedsWithValue(sizeof(sent_data)));
 }
 
-TEST_P(BlockingStreamSocketPairTest, RecvLessThanBufferWaitAll) {
+// Test that MSG_WAITALL causes recv to block until all requested data is
+// received. Random save can interrupt blocking and cause received data to be
+// returned, even if the amount received is less than the full requested amount.
+TEST_P(BlockingStreamSocketPairTest, RecvLessThanBufferWaitAll_NoRandomSave) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 
   char sent_data[100];
@@ -112,6 +117,10 @@ TEST_P(BlockingStreamSocketPairTest, RecvLessThanBufferWaitAll) {
 
   const ScopedThread t([&]() {
     absl::SleepFor(kDuration);
+
+    // Don't let saving after the write interrupt the blocking recv.
+    const DisableSave ds;
+
     ASSERT_THAT(write(sockets->first_fd(), sent_data, sizeof(sent_data)),
                 SyscallSucceedsWithValue(sizeof(sent_data)));
   });
@@ -135,11 +144,15 @@ TEST_P(BlockingStreamSocketPairTest, SendTimeout) {
       setsockopt(sockets->first_fd(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)),
       SyscallSucceeds());
 
-  char buf[100] = {};
+  std::vector<char> buf(kPageSize);
+  // We don't know how much data the socketpair will buffer, so we may do an
+  // arbitrarily large number of writes; saving after each write causes this
+  // test's time to explode.
+  const DisableSave ds;
   for (;;) {
     int ret;
     ASSERT_THAT(
-        ret = RetryEINTR(send)(sockets->first_fd(), buf, sizeof(buf), 0),
+        ret = RetryEINTR(send)(sockets->first_fd(), buf.data(), buf.size(), 0),
         ::testing::AnyOf(SyscallSucceeds(), SyscallFailsWithErrno(EAGAIN)));
     if (ret == -1) {
       break;

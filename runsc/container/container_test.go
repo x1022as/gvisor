@@ -39,9 +39,6 @@ import (
 	"gvisor.googlesource.com/gvisor/runsc/test/testutil"
 )
 
-// childReaper reaps child processes.
-var childReaper *testutil.Reaper
-
 // waitForProcessList waits for the given process list to show up in the container.
 func waitForProcessList(cont *Container, want []*control.Process) error {
 	cb := func() error {
@@ -73,6 +70,18 @@ func waitForProcessCount(cont *Container, want int) error {
 	}
 	// Gives plenty of time as tests can run slow under --race.
 	return testutil.Poll(cb, 30*time.Second)
+}
+
+func blockUntilWaitable(pid int) error {
+	_, _, err := testutil.RetryEintr(func() (uintptr, uintptr, error) {
+		var err error
+		_, _, err1 := syscall.Syscall6(syscall.SYS_WAITID, 1, uintptr(pid), 0, syscall.WEXITED|syscall.WNOWAIT, 0, 0)
+		if err1 != 0 {
+			err = err1
+		}
+		return 0, 0, err
+	})
+	return err
 }
 
 // procListsEqual is used to check whether 2 Process lists are equal for all
@@ -256,6 +265,11 @@ func configs(opts ...configOption) []*boot.Config {
 // It verifies after each step that the container can be loaded from disk, and
 // has the correct status.
 func TestLifecycle(t *testing.T) {
+	// Start the child reaper.
+	childReaper := &testutil.Reaper{}
+	childReaper.Start()
+	defer childReaper.Stop()
+
 	for _, conf := range configs(all...) {
 		t.Logf("Running test with conf: %+v", conf)
 		// The container will just sleep for a long time.  We will kill it before
@@ -1339,143 +1353,6 @@ func TestAbbreviatedIDs(t *testing.T) {
 	}
 }
 
-// Check that modifications to a volume mount are propigated into and out of
-// the sandbox.
-func TestContainerVolumeContentsShared(t *testing.T) {
-	// Only run this test with shared file access, since that is the only
-	// behavior it is testing.
-	conf := testutil.TestConfig()
-	conf.FileAccess = boot.FileAccessShared
-	t.Logf("Running test with conf: %+v", conf)
-
-	// Main process just sleeps. We will use "exec" to probe the state of
-	// the filesystem.
-	spec := testutil.NewSpecWithArgs("sleep", "1000")
-
-	dir, err := ioutil.TempDir(testutil.TmpDir(), "root-fs-test")
-	if err != nil {
-		t.Fatalf("TempDir failed: %v", err)
-	}
-
-	rootDir, bundleDir, err := testutil.SetupContainer(spec, conf)
-	if err != nil {
-		t.Fatalf("error setting up container: %v", err)
-	}
-	defer os.RemoveAll(rootDir)
-	defer os.RemoveAll(bundleDir)
-
-	// Create and start the container.
-	c, err := Create(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "")
-	if err != nil {
-		t.Fatalf("error creating container: %v", err)
-	}
-	defer c.Destroy()
-	if err := c.Start(conf); err != nil {
-		t.Fatalf("error starting container: %v", err)
-	}
-
-	// File that will be used to check consistency inside/outside sandbox.
-	filename := filepath.Join(dir, "file")
-
-	// File does not exist yet. Reading from the sandbox should fail.
-	argsTestFile := &control.ExecArgs{
-		Filename: "/usr/bin/test",
-		Argv:     []string{"test", "-f", filename},
-	}
-	if ws, err := c.executeSync(argsTestFile); err != nil {
-		t.Fatalf("unexpected error testing file %q: %v", filename, err)
-	} else if ws.ExitStatus() == 0 {
-		t.Errorf("test %q exited with code %v, wanted not zero", ws.ExitStatus(), err)
-	}
-
-	// Create the file from outside of the sandbox.
-	if err := ioutil.WriteFile(filename, []byte("foobar"), 0777); err != nil {
-		t.Fatalf("error writing to file %q: %v", filename, err)
-	}
-
-	// Now we should be able to test the file from within the sandbox.
-	if ws, err := c.executeSync(argsTestFile); err != nil {
-		t.Fatalf("unexpected error testing file %q: %v", filename, err)
-	} else if ws.ExitStatus() != 0 {
-		t.Errorf("test %q exited with code %v, wanted zero", filename, ws.ExitStatus())
-	}
-
-	// Rename the file from outside of the sandbox.
-	newFilename := filepath.Join(dir, "newfile")
-	if err := os.Rename(filename, newFilename); err != nil {
-		t.Fatalf("os.Rename(%q, %q) failed: %v", filename, newFilename, err)
-	}
-
-	// File should no longer exist at the old path within the sandbox.
-	if ws, err := c.executeSync(argsTestFile); err != nil {
-		t.Fatalf("unexpected error testing file %q: %v", filename, err)
-	} else if ws.ExitStatus() == 0 {
-		t.Errorf("test %q exited with code %v, wanted not zero", filename, ws.ExitStatus())
-	}
-
-	// We should be able to test the new filename from within the sandbox.
-	argsTestNewFile := &control.ExecArgs{
-		Filename: "/usr/bin/test",
-		Argv:     []string{"test", "-f", newFilename},
-	}
-	if ws, err := c.executeSync(argsTestNewFile); err != nil {
-		t.Fatalf("unexpected error testing file %q: %v", newFilename, err)
-	} else if ws.ExitStatus() != 0 {
-		t.Errorf("test %q exited with code %v, wanted zero", newFilename, ws.ExitStatus())
-	}
-
-	// Delete the renamed file from outside of the sandbox.
-	if err := os.Remove(newFilename); err != nil {
-		t.Fatalf("error removing file %q: %v", filename, err)
-	}
-
-	// Renamed file should no longer exist at the old path within the sandbox.
-	if ws, err := c.executeSync(argsTestNewFile); err != nil {
-		t.Fatalf("unexpected error testing file %q: %v", newFilename, err)
-	} else if ws.ExitStatus() == 0 {
-		t.Errorf("test %q exited with code %v, wanted not zero", newFilename, ws.ExitStatus())
-	}
-
-	// Now create the file from WITHIN the sandbox.
-	argsTouch := &control.ExecArgs{
-		Filename: "/usr/bin/touch",
-		Argv:     []string{"touch", filename},
-		KUID:     auth.KUID(os.Getuid()),
-		KGID:     auth.KGID(os.Getgid()),
-	}
-	if ws, err := c.executeSync(argsTouch); err != nil {
-		t.Fatalf("unexpected error touching file %q: %v", filename, err)
-	} else if ws.ExitStatus() != 0 {
-		t.Errorf("touch %q exited with code %v, wanted zero", filename, ws.ExitStatus())
-	}
-
-	// File should exist outside the sandbox.
-	if _, err := os.Stat(filename); err != nil {
-		t.Errorf("stat %q got error %v, wanted nil", filename, err)
-	}
-
-	// File should exist outside the sandbox.
-	if _, err := os.Stat(filename); err != nil {
-		t.Errorf("stat %q got error %v, wanted nil", filename, err)
-	}
-
-	// Delete the file from within the sandbox.
-	argsRemove := &control.ExecArgs{
-		Filename: "/bin/rm",
-		Argv:     []string{"rm", filename},
-	}
-	if ws, err := c.executeSync(argsRemove); err != nil {
-		t.Fatalf("unexpected error removing file %q: %v", filename, err)
-	} else if ws.ExitStatus() != 0 {
-		t.Errorf("remove %q exited with code %v, wanted zero", filename, ws.ExitStatus())
-	}
-
-	// File should not exist outside the sandbox.
-	if _, err := os.Stat(filename); !os.IsNotExist(err) {
-		t.Errorf("stat %q got error %v, wanted ErrNotExist", filename, err)
-	}
-}
-
 func TestGoferExits(t *testing.T) {
 	spec := testutil.NewSpecWithArgs("/bin/sleep", "10000")
 	conf := testutil.TestConfig()
@@ -1505,29 +1382,37 @@ func TestGoferExits(t *testing.T) {
 		t.Fatalf("error killing sandbox process: %v", err)
 	}
 
-	_, _, err = testutil.RetryEintr(func() (uintptr, uintptr, error) {
-		cpid, err := syscall.Wait4(c.GoferPid, nil, 0, nil)
-		return uintptr(cpid), 0, err
-	})
+	err = blockUntilWaitable(c.GoferPid)
 	if err != nil && err != syscall.ECHILD {
 		t.Errorf("error waiting for gofer to exit: %v", err)
 	}
 }
 
 func TestRootNotMount(t *testing.T) {
-	spec := testutil.NewSpecWithArgs("/bin/true")
-
-	root, err := ioutil.TempDir(testutil.TmpDir(), "root")
-	if err != nil {
-		t.Fatalf("failure to create tmp dir: %v", err)
+	if testutil.RaceEnabled {
+		// Requires statically linked binary, since it's mapping the root to a
+		// random dir, libs cannot be located.
+		t.Skip("race makes test_app not statically linked")
 	}
+
+	appSym, err := testutil.FindFile("runsc/container/test_app")
+	if err != nil {
+		t.Fatal("error finding test_app:", err)
+	}
+	app, err := filepath.EvalSymlinks(appSym)
+	if err != nil {
+		t.Fatalf("error resolving %q symlink: %v", appSym, err)
+	}
+	log.Infof("App path %q is a symlink to %q", appSym, app)
+
+	root := filepath.Dir(app)
+	exe := "/" + filepath.Base(app)
+	log.Infof("Executing %q in %q", exe, root)
+
+	spec := testutil.NewSpecWithArgs(exe, "help")
 	spec.Root.Path = root
 	spec.Root.Readonly = true
-	spec.Mounts = []specs.Mount{
-		{Destination: "/bin", Source: "/bin", Type: "bind", Options: []string{"ro"}},
-		{Destination: "/lib", Source: "/lib", Type: "bind", Options: []string{"ro"}},
-		{Destination: "/lib64", Source: "/lib64", Type: "bind", Options: []string{"ro"}},
-	}
+	spec.Mounts = nil
 
 	conf := testutil.TestConfig()
 	if err := run(spec, conf); err != nil {
@@ -1576,10 +1461,6 @@ func TestUserLog(t *testing.T) {
 }
 
 func TestWaitOnExitedSandbox(t *testing.T) {
-	// Disable the childReaper for this test.
-	childReaper.Stop()
-	defer childReaper.Start()
-
 	for _, conf := range configs(all...) {
 		t.Logf("Running test with conf: %+v", conf)
 
@@ -1692,6 +1573,192 @@ func TestDestroyStarting(t *testing.T) {
 	}
 }
 
+func TestCreateWorkingDir(t *testing.T) {
+	for _, conf := range configs(overlay) {
+		t.Logf("Running test with conf: %+v", conf)
+
+		tmpDir, err := ioutil.TempDir(testutil.TmpDir(), "cwd-create")
+		if err != nil {
+			t.Fatalf("ioutil.TempDir() failed: %v", err)
+		}
+		dir := path.Join(tmpDir, "new/working/dir")
+
+		// touch will fail if the directory doesn't exist.
+		spec := testutil.NewSpecWithArgs("/bin/touch", path.Join(dir, "file"))
+		spec.Process.Cwd = dir
+		spec.Root.Readonly = true
+
+		if err := run(spec, conf); err != nil {
+			t.Fatalf("Error running container: %v", err)
+		}
+	}
+}
+
+// TestMountPropagation verifies that mount propagates to slave but not to
+// private mounts.
+func TestMountPropagation(t *testing.T) {
+	// Setup dir structure:
+	//   - src: is mounted as shared and is used as source for both private and
+	//     slave mounts
+	//   - dir: will be bind mounted inside src and should propagate to slave
+	tmpDir, err := ioutil.TempDir(testutil.TmpDir(), "mount")
+	if err != nil {
+		t.Fatalf("ioutil.TempDir() failed: %v", err)
+	}
+	src := filepath.Join(tmpDir, "src")
+	srcMnt := filepath.Join(src, "mnt")
+	dir := filepath.Join(tmpDir, "dir")
+	for _, path := range []string{src, srcMnt, dir} {
+		if err := os.MkdirAll(path, 0777); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", path, err)
+		}
+	}
+	dirFile := filepath.Join(dir, "file")
+	f, err := os.Create(dirFile)
+	if err != nil {
+		t.Fatalf("os.Create(%q): %v", dirFile, err)
+	}
+	f.Close()
+
+	// Setup src as a shared mount.
+	if err := syscall.Mount(src, src, "bind", syscall.MS_BIND, ""); err != nil {
+		t.Fatalf("mount(%q, %q, MS_BIND): %v", dir, srcMnt, err)
+	}
+	if err := syscall.Mount("", src, "", syscall.MS_SHARED, ""); err != nil {
+		t.Fatalf("mount(%q, MS_SHARED): %v", srcMnt, err)
+	}
+
+	spec := testutil.NewSpecWithArgs("sleep", "1000")
+
+	priv := filepath.Join(tmpDir, "priv")
+	slave := filepath.Join(tmpDir, "slave")
+	spec.Mounts = []specs.Mount{
+		{
+			Source:      src,
+			Destination: priv,
+			Type:        "bind",
+			Options:     []string{"private"},
+		},
+		{
+			Source:      src,
+			Destination: slave,
+			Type:        "bind",
+			Options:     []string{"slave"},
+		},
+	}
+
+	conf := testutil.TestConfig()
+	rootDir, bundleDir, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer os.RemoveAll(rootDir)
+	defer os.RemoveAll(bundleDir)
+
+	cont, err := Create(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "")
+	if err != nil {
+		t.Fatalf("creating container: %v", err)
+	}
+	defer cont.Destroy()
+
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("starting container: %v", err)
+	}
+
+	// After the container is started, mount dir inside source and check what
+	// happens to both destinations.
+	if err := syscall.Mount(dir, srcMnt, "bind", syscall.MS_BIND, ""); err != nil {
+		t.Fatalf("mount(%q, %q, MS_BIND): %v", dir, srcMnt, err)
+	}
+
+	// Check that mount didn't propagate to private mount.
+	privFile := filepath.Join(priv, "mnt", "file")
+	args := &control.ExecArgs{
+		Filename: "/usr/bin/test",
+		Argv:     []string{"test", "!", "-f", privFile},
+	}
+	if ws, err := cont.executeSync(args); err != nil || ws != 0 {
+		t.Fatalf("exec: test ! -f %q, ws: %v, err: %v", privFile, ws, err)
+	}
+
+	// Check that mount propagated to slave mount.
+	slaveFile := filepath.Join(slave, "mnt", "file")
+	args = &control.ExecArgs{
+		Filename: "/usr/bin/test",
+		Argv:     []string{"test", "-f", slaveFile},
+	}
+	if ws, err := cont.executeSync(args); err != nil || ws != 0 {
+		t.Fatalf("exec: test -f %q, ws: %v, err: %v", privFile, ws, err)
+	}
+}
+
+func TestMountSymlink(t *testing.T) {
+	for _, conf := range configs(overlay) {
+		t.Logf("Running test with conf: %+v", conf)
+
+		dir, err := ioutil.TempDir(testutil.TmpDir(), "mount-symlink")
+		if err != nil {
+			t.Fatalf("ioutil.TempDir() failed: %v", err)
+		}
+
+		source := path.Join(dir, "source")
+		target := path.Join(dir, "target")
+		for _, path := range []string{source, target} {
+			if err := os.MkdirAll(path, 0777); err != nil {
+				t.Fatalf("os.MkdirAll(): %v", err)
+			}
+		}
+		f, err := os.Create(path.Join(source, "file"))
+		if err != nil {
+			t.Fatalf("os.Create(): %v", err)
+		}
+		f.Close()
+
+		link := path.Join(dir, "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("os.Symlink(%q, %q): %v", target, link, err)
+		}
+
+		spec := testutil.NewSpecWithArgs("/bin/sleep", "1000")
+
+		// Mount to a symlink to ensure the mount code will follow it and mount
+		// at the symlink target.
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Type:        "bind",
+			Destination: link,
+			Source:      source,
+		})
+
+		rootDir, bundleDir, err := testutil.SetupContainer(spec, conf)
+		if err != nil {
+			t.Fatalf("error setting up container: %v", err)
+		}
+		defer os.RemoveAll(rootDir)
+		defer os.RemoveAll(bundleDir)
+
+		cont, err := Create(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "")
+		if err != nil {
+			t.Fatalf("creating container: %v", err)
+		}
+		defer cont.Destroy()
+
+		if err := cont.Start(conf); err != nil {
+			t.Fatalf("starting container: %v", err)
+		}
+
+		// Check that symlink was resolved and mount was created where the symlink
+		// is pointing to.
+		file := path.Join(target, "file")
+		args := &control.ExecArgs{
+			Filename: "/usr/bin/test",
+			Argv:     []string{"test", "-f", file},
+		}
+		if ws, err := cont.executeSync(args); err != nil || ws != 0 {
+			t.Fatalf("exec: test -f %q, ws: %v, err: %v", file, ws, err)
+		}
+	}
+}
+
 // executeSync synchronously executes a new process.
 func (cont *Container) executeSync(args *control.ExecArgs) (syscall.WaitStatus, error) {
 	pid, err := cont.Execute(args)
@@ -1711,11 +1778,6 @@ func TestMain(m *testing.M) {
 		panic(err.Error())
 	}
 	testutil.RunAsRoot()
-
-	// Start the child reaper.
-	childReaper = &testutil.Reaper{}
-	childReaper.Start()
-	defer childReaper.Stop()
 
 	os.Exit(m.Run())
 }

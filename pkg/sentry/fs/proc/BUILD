@@ -1,4 +1,4 @@
-package(licenses = ["notice"])  # Apache 2.0
+package(licenses = ["notice"])
 
 load("//tools/go_stateify:defs.bzl", "go_library", "go_test")
 
@@ -8,9 +8,9 @@ go_library(
         "cpuinfo.go",
         "exec_args.go",
         "fds.go",
-        "file.go",
         "filesystems.go",
         "fs.go",
+        "inode.go",
         "loadavg.go",
         "meminfo.go",
         "mounts.go",
@@ -30,8 +30,10 @@ go_library(
     visibility = ["//pkg/sentry:internal"],
     deps = [
         "//pkg/abi/linux",
+        "//pkg/log",
         "//pkg/sentry/context",
         "//pkg/sentry/fs",
+        "//pkg/sentry/fs/fsutil",
         "//pkg/sentry/fs/proc/device",
         "//pkg/sentry/fs/proc/seqfile",
         "//pkg/sentry/fs/ramfs",
@@ -40,11 +42,15 @@ go_library(
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/kernel/kdefs",
         "//pkg/sentry/kernel/time",
+        "//pkg/sentry/limits",
         "//pkg/sentry/mm",
         "//pkg/sentry/socket/rpcinet",
+        "//pkg/sentry/socket/unix",
+        "//pkg/sentry/socket/unix/transport",
         "//pkg/sentry/usage",
         "//pkg/sentry/usermem",
         "//pkg/syserror",
+        "//pkg/waiter",
     ],
 )
 
