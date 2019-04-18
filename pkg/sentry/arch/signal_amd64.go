@@ -357,6 +357,11 @@ func (c *context64) SignalSetup(st *Stack, act *SignalAct, info *SignalInfo, alt
 	// interrupted thread inside the sentry. Simply accounting for this
 	// space on the user stack naturally caps the amount of memory the
 	// sentry will allocate for this purpose.
+	st.Bottom = sp
+	fpstateAddr, err := st.Push(c.x86FPState)
+	if err != nil {
+		return err
+	}
 	fpSize, _ := c.fpuFrameSize()
 	sp = (sp - usermem.Addr(fpSize)) & ^usermem.Addr(63)
 
@@ -388,6 +393,11 @@ func (c *context64) SignalSetup(st *Stack, act *SignalAct, info *SignalInfo, alt
 			Cs:      uint16(c.Regs.Cs),
 			Ss:      uint16(c.Regs.Ss),
 			Oldmask: sigset,
+			// Fpstate may not be neccessary, but uninitialized
+			// Fpstate address may cause potentially segmentation
+			// fault when userspace signal handler trying to
+			// dereference it.
+			Fpstate: uint64(fpstateAddr),
 		},
 		Sigset: sigset,
 	}

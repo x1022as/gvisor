@@ -117,6 +117,30 @@ TEST(SigIretTest, BadHandler) {
       << "status = " << status;
 }
 
+volatile uint64_t fpstate = 0;
+
+void sigusr1Handler(int sig, siginfo_t* siginfo, void* _uc) {
+  ucontext_t* uc = reinterpret_cast<ucontext_t*>(_uc);
+
+  // get fpstate from sighandler context
+  fpstate = reinterpret_cast<uint64_t>(uc->uc_mcontext.fpregs);
+}
+
+// Test that fpstate in sighandler context is not nil.
+TEST(SigIretTest, Fpstate) {
+  // Setup signal handler for SIGVTALRM.
+  struct sigaction sa = {};
+  sigfillset(&sa.sa_mask);
+  sa.sa_sigaction = sigusr1Handler;
+  sa.sa_flags = SA_SIGINFO;
+  auto const action_cleanup =
+      ASSERT_NO_ERRNO_AND_VALUE(ScopedSigaction(SIGUSR1, sa));
+
+  EXPECT_THAT(kill(getpid(), SIGUSR1), SyscallSucceeds());
+
+  EXPECT_NE(fpstate, 0);
+}
+
 }  // namespace
 
 }  // namespace testing
