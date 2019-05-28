@@ -37,6 +37,10 @@ const maxRegisterSize = 16
 //go:noescape
 func memcpy(dst, src unsafe.Pointer, n uintptr) (fault unsafe.Pointer, sig int32)
 
+func Memcpy(dst, src unsafe.Pointer, n uintptr) (fault unsafe.Pointer, sig int32) {
+	return memcpy(dst, src, n)
+}
+
 // memclr sets the n bytes following ptr to zeroes. If a SIGSEGV or SIGBUS
 // signal is received during the write, it returns the address that caused the
 // fault and the number of the signal that was received. Otherwise, it returns

@@ -59,11 +59,21 @@ type FDBasedLink struct {
 	LinkAddress []byte
 }
 
-// LoopbackLink configures a loopback li nk.
+// LoopbackLink configures a loopback link.
 type LoopbackLink struct {
 	Name      string
 	Addresses []net.IP
 	Routes    []Route
+}
+
+// VhostUserLink configures a vhost-user link
+type VhostUserLink struct {
+	Name        string
+	MTU         int
+	Addresses   []net.IP
+	Routes      []Route
+	LInkAddress []byte
+	ControlPath string
 }
 
 // CreateLinksAndRoutesArgs are arguments to CreateLinkAndRoutes.
@@ -72,8 +82,9 @@ type CreateLinksAndRoutesArgs struct {
 	// two slices must have the same length.
 	urpc.FilePayload
 
-	LoopbackLinks []LoopbackLink
-	FDBasedLinks  []FDBasedLink
+	LoopbackLinks  []LoopbackLink
+	FDBasedLinks   []FDBasedLink
+	VhostUserLinks []VhostUserLink
 
 	DefaultGateway DefaultRoute
 }
@@ -147,6 +158,27 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		if err != nil {
 			return err
 		}
+
+		log.Infof("Enabling interface %q with id %d on addresses %+v (%v)", link.Name, nicID, link.Addresses, mac)
+		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses, false /* loopback */); err != nil {
+			return err
+		}
+
+		// Collect the routes from this link.
+		for _, r := range link.Routes {
+			routes = append(routes, r.toTcpipRoute(nicID))
+		}
+	}
+
+	for _, link := range args.VhostUserLinks {
+		nicID++
+		nicids[link.Name] = nicID
+
+		mac := tcpip.LinkAddress(link.LinkAddress)
+		linkEP := vhostuser.New(&vhostuser.Options{
+			MTU:       uint32(link.MTU),
+			Addresses: mac,
+		})
 
 		log.Infof("Enabling interface %q with id %d on addresses %+v (%v)", link.Name, nicID, link.Addresses, mac)
 		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses, false /* loopback */); err != nil {
