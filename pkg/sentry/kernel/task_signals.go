@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -224,7 +224,7 @@ func (t *Task) deliverSignal(info *arch.SignalInfo, act arch.SignalAct) taskRunS
 			// Send a forced SIGSEGV. If the signal that couldn't be delivered
 			// was a SIGSEGV, force the handler to SIG_DFL.
 			t.forceSignal(linux.SIGSEGV, linux.Signal(info.Signo) == linux.SIGSEGV /* unconditional */)
-			t.SendSignal(sigPriv(linux.SIGSEGV))
+			t.SendSignal(SignalInfoPriv(linux.SIGSEGV))
 		}
 
 	default:
@@ -307,7 +307,7 @@ func (t *Task) SignalReturn(rt bool) (*SyscallControl, error) {
 func (t *Task) Sigtimedwait(set linux.SignalSet, timeout time.Duration) (*arch.SignalInfo, error) {
 	// set is the set of signals we're interested in; invert it to get the set
 	// of signals to block.
-	mask := ^set &^ UnblockableSignals
+	mask := ^(set &^ UnblockableSignals)
 
 	t.tg.signalHandlers.mu.Lock()
 	defer t.tg.signalHandlers.mu.Unlock()
@@ -509,7 +509,7 @@ func (t *Task) canReceiveSignalLocked(sig linux.Signal) bool {
 	if t.stop != nil {
 		return false
 	}
-	// - TODO: No special case for when t is also the sending task,
+	// - TODO(b/38173783): No special case for when t is also the sending task,
 	// because the identity of the sender is unknown.
 	// - Do not choose tasks that have already been interrupted, as they may be
 	// busy handling another signal.
@@ -895,7 +895,7 @@ func (t *Task) signalStop(target *Task, code int32, status int32) {
 		sigchld.SetPid(int32(t.tg.pidns.tids[target]))
 		sigchld.SetUid(int32(target.Credentials().RealKUID.In(t.UserNamespace()).OrOverflow()))
 		sigchld.SetStatus(status)
-		// TODO: Set utime, stime.
+		// TODO(b/72102453): Set utime, stime.
 		t.sendSignalLocked(sigchld, true /* group */)
 	}
 }

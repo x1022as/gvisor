@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -322,7 +322,7 @@ type itimerRealListener struct {
 
 // Notify implements ktime.TimerListener.Notify.
 func (l *itimerRealListener) Notify(exp uint64) {
-	l.tg.SendSignal(sigPriv(linux.SIGALRM))
+	l.tg.SendSignal(SignalInfoPriv(linux.SIGALRM))
 }
 
 // Destroy implements ktime.TimerListener.Destroy.

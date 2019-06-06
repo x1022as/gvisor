@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -123,7 +123,7 @@ func (i *inodeFileState) afterLoad() {
 			// beforeSave.
 			return fmt.Errorf("failed to find path for inode number %d. Device %s contains %s", i.sattr.InodeID, i.s.connID, fs.InodeMappings(i.s.inodeMappings))
 		}
-		// TODO: Context is not plumbed to save/restore.
+		// TODO(b/38173783): Context is not plumbed to save/restore.
 		ctx := &dummyClockContext{context.Background()}
 
 		_, i.file, err = i.s.attach.walk(ctx, splitAbsolutePath(name))

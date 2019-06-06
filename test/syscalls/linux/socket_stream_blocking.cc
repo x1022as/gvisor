@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ namespace gvisor {
 namespace testing {
 
 TEST_P(BlockingStreamSocketPairTest, BlockPartialWriteClosed) {
-    // FIXME: gVisor doesn't support SO_SNDBUF on UDS, nor does it
+    // FIXME(b/35921550): gVisor doesn't support SO_SNDBUF on UDS, nor does it
     // enforce any limit; it will write arbitrary amounts of data without
     // blocking.
     SKIP_IF(IsRunningOnGvisor());

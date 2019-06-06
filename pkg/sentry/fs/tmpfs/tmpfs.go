@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import (
 var fsInfo = fs.Info{
 	Type: linux.TMPFS_MAGIC,
 
-	// TODO: allow configuring a tmpfs size and enforce it.
+	// TODO(b/29637826): allow configuring a tmpfs size and enforce it.
 	TotalBlocks: 0,
 	FreeBlocks:  0,
 }
@@ -150,12 +150,12 @@ func (d *Dir) CreateFifo(ctx context.Context, dir *fs.Inode, name string, perms 
 }
 
 // Getxattr implements fs.InodeOperations.Getxattr.
-func (d *Dir) Getxattr(i *fs.Inode, name string) ([]byte, error) {
+func (d *Dir) Getxattr(i *fs.Inode, name string) (string, error) {
 	return d.ramfsDir.Getxattr(i, name)
 }
 
 // Setxattr implements fs.InodeOperations.Setxattr.
-func (d *Dir) Setxattr(i *fs.Inode, name string, value []byte) error {
+func (d *Dir) Setxattr(i *fs.Inode, name, value string) error {
 	return d.ramfsDir.Setxattr(i, name, value)
 }
 
@@ -238,13 +238,18 @@ func (d *Dir) newCreateOps() *ramfs.CreateOps {
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (d *Dir) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (d *Dir) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return rename(ctx, oldParent, oldName, newParent, newName, replacement)
 }
 
-// StatFS implments fs.InodeOperations.StatFS.
+// StatFS implements fs.InodeOperations.StatFS.
 func (*Dir) StatFS(context.Context) (fs.Info, error) {
 	return fsInfo, nil
+}
+
+// Allocate implements fs.InodeOperations.Allocate.
+func (d *Dir) Allocate(ctx context.Context, node *fs.Inode, offset, length int64) error {
+	return d.ramfsDir.Allocate(ctx, node, offset, length)
 }
 
 // Symlink is a symlink.
@@ -266,7 +271,7 @@ func NewSymlink(ctx context.Context, target string, owner fs.FileOwner, msrc *fs
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (s *Symlink) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (s *Symlink) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return rename(ctx, oldParent, oldName, newParent, newName, replacement)
 }
 
@@ -281,6 +286,7 @@ func (s *Symlink) StatFS(context.Context) (fs.Info, error) {
 type Socket struct {
 	ramfs.Socket
 	fsutil.InodeNotTruncatable `state:"nosave"`
+	fsutil.InodeNotAllocatable `state:"nosave"`
 }
 
 // NewSocket returns a new socket with the provided permissions.
@@ -295,7 +301,7 @@ func NewSocket(ctx context.Context, socket transport.BoundEndpoint, owner fs.Fil
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (s *Socket) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (s *Socket) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return rename(ctx, oldParent, oldName, newParent, newName, replacement)
 }
 
@@ -332,7 +338,7 @@ func NewFifo(ctx context.Context, owner fs.FileOwner, perms fs.FilePermissions, 
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (f *Fifo) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (f *Fifo) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return rename(ctx, oldParent, oldName, newParent, newName, replacement)
 }
 

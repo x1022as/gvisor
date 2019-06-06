@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ func (FileNoopRelease) Release() {}
 //
 // Currently only seeking to 0 on a directory is supported.
 //
-// FIXME: Lift directory seeking limitations.
+// FIXME(b/33075855): Lift directory seeking limitations.
 func SeekWithDirCursor(ctx context.Context, file *fs.File, whence fs.SeekWhence, offset int64, dirCursor *string) (int64, error) {
 	inode := file.Dirent.Inode
 	current := file.Offset()
@@ -50,7 +50,7 @@ func SeekWithDirCursor(ctx context.Context, file *fs.File, whence fs.SeekWhence,
 	if fs.IsCharDevice(inode.StableAttr) {
 		// Ignore seek requests.
 		//
-		// FIXME: This preserves existing
+		// FIXME(b/34716638): This preserves existing
 		// behavior but is not universally correct.
 		return 0, nil
 	}
@@ -104,7 +104,7 @@ func SeekWithDirCursor(ctx context.Context, file *fs.File, whence fs.SeekWhence,
 				return current, syserror.EINVAL
 			}
 			return sz + offset, nil
-		// FIXME: This is not universally correct.
+		// FIXME(b/34778850): This is not universally correct.
 		// Remove SpecialDirectory.
 		case fs.SpecialDirectory:
 			if offset != 0 {
@@ -112,7 +112,7 @@ func SeekWithDirCursor(ctx context.Context, file *fs.File, whence fs.SeekWhence,
 			}
 			// SEEK_END to 0 moves the directory "cursor" to the end.
 			//
-			// FIXME: The ensures that after the seek,
+			// FIXME(b/35442290): The ensures that after the seek,
 			// reading on the directory will get EOF. But it is not
 			// correct in general because the directory can grow in
 			// size; attempting to read those new entries will be
@@ -223,8 +223,22 @@ func (FileNoIoctl) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallAr
 	return 0, syserror.ENOTTY
 }
 
+// FileNoSplice implements fs.FileOperations.ReadFrom and
+// fs.FileOperations.WriteTo for files that don't support splice.
+type FileNoSplice struct{}
+
+// WriteTo implements fs.FileOperations.WriteTo.
+func (FileNoSplice) WriteTo(context.Context, *fs.File, *fs.File, fs.SpliceOpts) (int64, error) {
+	return 0, syserror.ENOSYS
+}
+
+// ReadFrom implements fs.FileOperations.ReadFrom.
+func (FileNoSplice) ReadFrom(context.Context, *fs.File, *fs.File, fs.SpliceOpts) (int64, error) {
+	return 0, syserror.ENOSYS
+}
+
 // DirFileOperations implements most of fs.FileOperations for directories,
-// except for Readdir which the embedding type must implement.
+// except for Readdir and UnstableAttr which the embedding type must implement.
 type DirFileOperations struct {
 	waiter.AlwaysReady
 	FileGenericSeek
@@ -233,6 +247,7 @@ type DirFileOperations struct {
 	FileNoopFlush
 	FileNoopFsync
 	FileNoopRelease
+	FileNoSplice
 }
 
 // Read implements fs.FileOperations.Read
@@ -250,7 +265,8 @@ func (*DirFileOperations) Write(context.Context, *fs.File, usermem.IOSequence, i
 //
 // +stateify savable
 type StaticDirFileOperations struct {
-	DirFileOperations
+	DirFileOperations        `state:"nosave"`
+	FileUseInodeUnstableAttr `state:"nosave"`
 
 	// dentryMap is a SortedDentryMap used to implement Readdir.
 	dentryMap *fs.SortedDentryMap
@@ -277,7 +293,9 @@ func (sdfo *StaticDirFileOperations) IterateDir(ctx context.Context, dirCtx *fs.
 // Readdir implements fs.FileOperations.Readdir.
 func (sdfo *StaticDirFileOperations) Readdir(ctx context.Context, file *fs.File, serializer fs.DentrySerializer) (int64, error) {
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 	dirCtx := &fs.DirCtx{
 		Serializer: serializer,
 		DirCursor:  &sdfo.dirCursor,
@@ -289,16 +307,18 @@ func (sdfo *StaticDirFileOperations) Readdir(ctx context.Context, file *fs.File,
 //
 // +stateify savable
 type NoReadWriteFile struct {
-	waiter.AlwaysReady `state:"nosave"`
-	FileGenericSeek    `state:"nosave"`
-	FileNoIoctl        `state:"nosave"`
-	FileNoMMap         `state:"nosave"`
-	FileNoopFsync      `state:"nosave"`
-	FileNoopFlush      `state:"nosave"`
-	FileNoopRelease    `state:"nosave"`
-	FileNoRead         `state:"nosave"`
-	FileNoWrite        `state:"nosave"`
-	FileNotDirReaddir  `state:"nosave"`
+	waiter.AlwaysReady       `state:"nosave"`
+	FileGenericSeek          `state:"nosave"`
+	FileNoIoctl              `state:"nosave"`
+	FileNoMMap               `state:"nosave"`
+	FileNoopFsync            `state:"nosave"`
+	FileNoopFlush            `state:"nosave"`
+	FileNoopRelease          `state:"nosave"`
+	FileNoRead               `state:"nosave"`
+	FileNoWrite              `state:"nosave"`
+	FileNotDirReaddir        `state:"nosave"`
+	FileUseInodeUnstableAttr `state:"nosave"`
+	FileNoSplice             `state:"nosave"`
 }
 
 var _ fs.FileOperations = (*NoReadWriteFile)(nil)
@@ -362,4 +382,13 @@ type FileNoopRead struct{}
 // Read implements fs.FileOperations.Read.
 func (FileNoopRead) Read(context.Context, *fs.File, usermem.IOSequence, int64) (int64, error) {
 	return 0, nil
+}
+
+// FileUseInodeUnstableAttr implements fs.FileOperations.UnstableAttr by calling
+// InodeOperations.UnstableAttr.
+type FileUseInodeUnstableAttr struct{}
+
+// UnstableAttr implements fs.FileOperations.UnstableAttr.
+func (FileUseInodeUnstableAttr) UnstableAttr(ctx context.Context, file *fs.File) (fs.UnstableAttr, error) {
+	return file.Dirent.Inode.UnstableAttr(ctx)
 }

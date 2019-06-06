@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -158,7 +158,7 @@ TEST_F(IoctlTest, FIOASYNCNoTarget) {
 }
 
 TEST_F(IoctlTest, FIOASYNCSelfTarget) {
-  // FIXME: gVisor erroneously sends SIGIO on close(2), which would
+  // FIXME(b/120624367): gVisor erroneously sends SIGIO on close(2), which would
   // kill the test when pair goes out of scope. Temporarily ignore SIGIO so that
   // that the close signal is ignored.
   struct sigaction sa;
@@ -195,7 +195,7 @@ TEST_F(IoctlTest, FIOASYNCSelfTarget) {
 // Equivalent to FIOASYNCSelfTarget except that FIOSETOWN is called before
 // FIOASYNC.
 TEST_F(IoctlTest, FIOASYNCSelfTarget2) {
-  // FIXME: gVisor erroneously sends SIGIO on close(2), which would
+  // FIXME(b/120624367): gVisor erroneously sends SIGIO on close(2), which would
   // kill the test when pair goes out of scope. Temporarily ignore SIGIO so that
   // that the close signal is ignored.
   struct sigaction sa;
@@ -348,8 +348,8 @@ std::vector<SocketKind> IoctlSocketTypes() {
           SimpleSocket(AF_INET6, SOCK_DGRAM, 0)};
 }
 
-INSTANTIATE_TEST_CASE_P(IoctlTest, IoctlTestSIOCGIFCONF,
-                        ::testing::ValuesIn(IoctlSocketTypes()));
+INSTANTIATE_TEST_SUITE_P(IoctlTest, IoctlTestSIOCGIFCONF,
+                         ::testing::ValuesIn(IoctlSocketTypes()));
 
 }  // namespace
 

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ namespace {
 static int tkill(pid_t tid, int sig) {
   int ret;
   do {
-    // NOTE: tkill(2) could return EAGAIN for RT signals.
+    // NOTE(b/25434735): tkill(2) could return EAGAIN for RT signals.
     ret = syscall(SYS_tkill, tid, sig);
   } while (ret == -1 && errno == EAGAIN);
   return ret;

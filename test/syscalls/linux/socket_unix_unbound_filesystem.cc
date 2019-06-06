@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,7 +70,7 @@ TEST_P(UnboundFilesystemUnixSocketPairTest, GetSockNameLength) {
             strlen(want_addr.sun_path) + 1 + sizeof(want_addr.sun_family));
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     AllUnixDomainSockets, UnboundFilesystemUnixSocketPairTest,
     ::testing::ValuesIn(ApplyVec<SocketPairKind>(
         FilesystemUnboundUnixDomainSocketPair,

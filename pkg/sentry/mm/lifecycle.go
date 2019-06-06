@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ func NewMemoryManager(p platform.Platform, mfp pgalloc.MemoryFileProvider) *Memo
 		privateRefs: &privateRefs{},
 		users:       1,
 		auxv:        arch.Auxv{},
+		dumpability: UserDumpable,
 		aioManager:  aioManager{contexts: make(map[uint64]*AIOContext)},
 	}
 }
@@ -69,6 +70,7 @@ func (mm *MemoryManager) Fork(ctx context.Context) (*MemoryManager, error) {
 		users:       1,
 		brk:         mm.brk,
 		usageAS:     mm.usageAS,
+		dataAS:      mm.dataAS,
 		// "The child does not inherit its parent's memory locks (mlock(2),
 		// mlockall(2))." - fork(2). So lockedAS is 0 and defMLockMode is
 		// MLockNone, both of which are zero values. vma.mlockMode is reset
@@ -78,8 +80,9 @@ func (mm *MemoryManager) Fork(ctx context.Context) (*MemoryManager, error) {
 		envv:                 mm.envv,
 		auxv:                 append(arch.Auxv(nil), mm.auxv...),
 		// IncRef'd below, once we know that there isn't an error.
-		executable: mm.executable,
-		aioManager: aioManager{contexts: make(map[uint64]*AIOContext)},
+		executable:  mm.executable,
+		dumpability: mm.dumpability,
+		aioManager:  aioManager{contexts: make(map[uint64]*AIOContext)},
 	}
 
 	// Copy vmas.

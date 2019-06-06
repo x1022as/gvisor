@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,9 +33,12 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <ostream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -59,15 +62,18 @@
 #include "test/util/temp_path.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
+#include "test/util/time_util.h"
 #include "test/util/timer_util.h"
 
-// NOTE: No, this isn't really a syscall but this is a really simple
+// NOTE(magi): No, this isn't really a syscall but this is a really simple
 // way to get it tested on both gVisor, PTrace and Linux.
 
 using ::testing::AllOf;
+using ::testing::AnyOf;
 using ::testing::ContainerEq;
 using ::testing::Contains;
 using ::testing::ContainsRegex;
+using ::testing::Eq;
 using ::testing::Gt;
 using ::testing::HasSubstr;
 using ::testing::IsSupersetOf;
@@ -81,6 +87,16 @@ extern char** environ;
 namespace gvisor {
 namespace testing {
 namespace {
+
+#ifndef SUID_DUMP_DISABLE
+#define SUID_DUMP_DISABLE 0
+#endif /* SUID_DUMP_DISABLE */
+#ifndef SUID_DUMP_USER
+#define SUID_DUMP_USER 1
+#endif /* SUID_DUMP_USER */
+#ifndef SUID_DUMP_ROOT
+#define SUID_DUMP_ROOT 2
+#endif /* SUID_DUMP_ROOT */
 
 // O_LARGEFILE as defined by Linux. glibc tries to be clever by setting it to 0
 // because "it isn't needed", even though Linux can return it via F_GETFL.
@@ -99,8 +115,11 @@ std::vector<std::string> saved_argv;  // NOLINT
 void CompareProcessState(absl::string_view state, int pid) {
   auto status_file = ASSERT_NO_ERRNO_AND_VALUE(
       GetContents(absl::StrCat("/proc/", pid, "/status")));
-  EXPECT_THAT(status_file, ContainsRegex(absl::StrCat("State:.[", state,
-                                                      "]\\s+\\(\\w+\\)")));
+  // N.B. POSIX extended regexes don't support shorthand character classes (\w)
+  // inside of brackets.
+  EXPECT_THAT(status_file,
+              ContainsRegex(absl::StrCat("State:.[", state,
+                                         R"EOL(]\s+\([a-zA-Z ]+\))EOL")));
 }
 
 // Run callbacks while a subprocess is running, zombied, and/or exited.
@@ -130,7 +149,6 @@ PosixError WithSubprocess(SubprocessCallback const& running,
     while (true) {
       SleepSafe(absl::Milliseconds(100));
     }
-    __builtin_unreachable();
   }
 
   close(pipe_fds[1]);  // Close the write end.
@@ -487,7 +505,7 @@ TEST(ProcSelfMaps, Map1) {
 }
 
 TEST(ProcSelfMaps, Map2) {
-  // NOTE: The permissions must be different or the pages will get merged.
+  // NOTE(magi): The permissions must be different or the pages will get merged.
   Mapping map1 = ASSERT_NO_ERRNO_AND_VALUE(
       MmapAnon(kPageSize, PROT_READ | PROT_EXEC, MAP_PRIVATE));
   Mapping map2 =
@@ -562,12 +580,9 @@ TEST(ProcSelfMaps, MapUnmap) {
 }
 
 TEST(ProcSelfMaps, Mprotect) {
-  if (!IsRunningOnGvisor()) {
-    // FIXME: Linux's mprotect() sometimes fails to merge VMAs in this
-    // case.
-    LOG(WARNING) << "Skipping test on Linux";
-    return;
-  }
+  // FIXME(jamieliu): Linux's mprotect() sometimes fails to merge VMAs in this
+  // case.
+  SKIP_IF(!IsRunningOnGvisor());
 
   // Reserve 5 pages of address space.
   Mapping m = ASSERT_NO_ERRNO_AND_VALUE(
@@ -720,6 +735,10 @@ TEST(ProcCpuinfo, RequiredFieldsArePresent) {
   for (const std::string& field : required_fields) {
     EXPECT_THAT(proc_cpuinfo, HasSubstr(field));
   }
+}
+
+TEST(ProcCpuinfo, DeniesWrite) {
+  EXPECT_THAT(open("/proc/cpuinfo", O_WRONLY), SyscallFailsWithErrno(EACCES));
 }
 
 // Sanity checks that uptime is present.
@@ -901,8 +920,8 @@ TEST_P(ProcPidStatTest, HasBasicFields) {
   EXPECT_GT(rsslim, 0);
 }
 
-INSTANTIATE_TEST_CASE_P(SelfAndNumericPid, ProcPidStatTest,
-                        ::testing::Values("self", absl::StrCat(getpid())));
+INSTANTIATE_TEST_SUITE_P(SelfAndNumericPid, ProcPidStatTest,
+                         ::testing::Values("self", absl::StrCat(getpid())));
 
 using ProcPidStatmTest = ::testing::TestWithParam<std::string>;
 
@@ -922,8 +941,8 @@ TEST_P(ProcPidStatmTest, HasBasicFields) {
   EXPECT_GT(rss, 0);
 }
 
-INSTANTIATE_TEST_CASE_P(SelfAndNumericPid, ProcPidStatmTest,
-                        ::testing::Values("self", absl::StrCat(getpid())));
+INSTANTIATE_TEST_SUITE_P(SelfAndNumericPid, ProcPidStatmTest,
+                         ::testing::Values("self", absl::StrCat(getpid())));
 
 PosixErrorOr<uint64_t> CurrentRSS() {
   ASSIGN_OR_RETURN_ERRNO(auto proc_self_stat, GetContents("/proc/self/stat"));
@@ -974,7 +993,7 @@ void MapPopulateRSS(int prot, uint64_t* before, uint64_t* after) {
   *after = ASSERT_NO_ERRNO_AND_VALUE(CurrentRSS());
 }
 
-// TODO: Test for PROT_READ + MAP_POPULATE anonymous mappings. Their
+// TODO(b/73896574): Test for PROT_READ + MAP_POPULATE anonymous mappings. Their
 // semantics are more subtle:
 //
 // Small pages -> Zero page mapped, not counted in RSS
@@ -1137,7 +1156,7 @@ TEST(ProcPidStatusTest, ValuesAreTabDelimited) {
 
 // Threads properly counts running threads.
 //
-// TODO: Test zombied threads while the thread group leader is still
+// TODO(mpratt): Test zombied threads while the thread group leader is still
 // running with generalized fork and clone children from the wait test.
 TEST(ProcPidStatusTest, Threads) {
   char buf[4096] = {};
@@ -1173,7 +1192,7 @@ bool IsDigits(absl::string_view s) {
   return std::all_of(s.begin(), s.end(), absl::ascii_isdigit);
 }
 
-TEST(ProcPidStatTest, VSSRSS) {
+TEST(ProcPidStatTest, VmStats) {
   std::string status_str =
       ASSERT_NO_ERRNO_AND_VALUE(GetContents("/proc/self/status"));
   ASSERT_FALSE(status_str.empty());
@@ -1204,6 +1223,19 @@ TEST(ProcPidStatTest, VSSRSS) {
   EXPECT_TRUE(IsDigits(rss_str.substr(0, rss_str.length() - 3))) << rss_str;
   // ... which is not 0.
   EXPECT_NE('0', rss_str[0]);
+
+  const auto data_it = status.find("VmData");
+  ASSERT_NE(data_it, status.end());
+
+  absl::string_view data_str(data_it->second);
+
+  // Room for the " kB" suffix plus at least one digit.
+  ASSERT_GT(data_str.length(), 3);
+  EXPECT_TRUE(absl::EndsWith(data_str, " kB"));
+  // Everything else is part of a number.
+  EXPECT_TRUE(IsDigits(data_str.substr(0, data_str.length() - 3))) << data_str;
+  // ... which is not 0.
+  EXPECT_NE('0', data_str[0]);
 }
 
 // Parse an array of NUL-terminated char* arrays, returning a vector of strings.
@@ -1271,7 +1303,7 @@ TEST(ProcPidSymlink, SubprocessRunning) {
               SyscallSucceedsWithValue(sizeof(buf)));
 }
 
-// FIXME: Inconsistent behavior between gVisor and linux
+// FIXME(gvisor.dev/issue/164): Inconsistent behavior between gVisor and linux
 // on proc files.
 TEST(ProcPidSymlink, SubprocessZombied) {
   ASSERT_NO_ERRNO(SetCapability(CAP_DAC_OVERRIDE, false));
@@ -1295,13 +1327,13 @@ TEST(ProcPidSymlink, SubprocessZombied) {
                 SyscallFailsWithErrno(want));
   }
 
-  // FIXME: Inconsistent behavior between gVisor and linux
+  // FIXME(gvisor.dev/issue/164): Inconsistent behavior between gVisor and linux
   // on proc files.
   // 4.17 & gVisor: Syscall succeeds and returns 1
   // EXPECT_THAT(ReadlinkWhileZombied("ns/pid", buf, sizeof(buf)),
   //            SyscallFailsWithErrno(EACCES));
 
-  // FIXME: Inconsistent behavior between gVisor and linux
+  // FIXME(gvisor.dev/issue/164): Inconsistent behavior between gVisor and linux
   // on proc files.
   // 4.17 &  gVisor: Syscall succeeds and returns 1.
   // EXPECT_THAT(ReadlinkWhileZombied("ns/user", buf, sizeof(buf)),
@@ -1310,7 +1342,7 @@ TEST(ProcPidSymlink, SubprocessZombied) {
 
 // Test whether /proc/PID/ symlinks can be read for an exited process.
 TEST(ProcPidSymlink, SubprocessExited) {
-  // FIXME: These all succeed on gVisor.
+  // FIXME(gvisor.dev/issue/164): These all succeed on gVisor.
   SKIP_IF(IsRunningOnGvisor());
 
   char buf[1];
@@ -1377,7 +1409,7 @@ TEST(ProcPidFile, SubprocessZombie) {
   char buf[1];
 
   // 4.17: Succeeds and returns 1
-  // gVisor: Succeds and returns 0
+  // gVisor: Succeeds and returns 0
   EXPECT_THAT(ReadWhileZombied("auxv", buf, sizeof(buf)), SyscallSucceeds());
 
   EXPECT_THAT(ReadWhileZombied("cmdline", buf, sizeof(buf)),
@@ -1401,7 +1433,7 @@ TEST(ProcPidFile, SubprocessZombie) {
   EXPECT_THAT(ReadWhileZombied("uid_map", buf, sizeof(buf)),
               SyscallSucceedsWithValue(sizeof(buf)));
 
-  // FIXME: Inconsistent behavior between gVisor and linux
+  // FIXME(gvisor.dev/issue/164): Inconsistent behavior between gVisor and linux
   // on proc files.
   // gVisor & 4.17: Succeeds and returns 1.
   // EXPECT_THAT(ReadWhileZombied("io", buf, sizeof(buf)),
@@ -1412,7 +1444,7 @@ TEST(ProcPidFile, SubprocessZombie) {
 TEST(ProcPidFile, SubprocessExited) {
   char buf[1];
 
-  // FIXME: Inconsistent behavior between kernels
+  // FIXME(gvisor.dev/issue/164): Inconsistent behavior between kernels
   // gVisor: Fails with ESRCH.
   // 4.17: Succeeds and returns 1.
   // EXPECT_THAT(ReadWhileExited("auxv", buf, sizeof(buf)),
@@ -1422,7 +1454,7 @@ TEST(ProcPidFile, SubprocessExited) {
               SyscallFailsWithErrno(ESRCH));
 
   if (!IsRunningOnGvisor()) {
-    // FIXME: Succeeds on gVisor.
+    // FIXME(gvisor.dev/issue/164): Succeeds on gVisor.
     EXPECT_THAT(ReadWhileExited("comm", buf, sizeof(buf)),
                 SyscallFailsWithErrno(ESRCH));
   }
@@ -1431,25 +1463,25 @@ TEST(ProcPidFile, SubprocessExited) {
               SyscallSucceedsWithValue(sizeof(buf)));
 
   if (!IsRunningOnGvisor()) {
-    // FIXME: Succeeds on gVisor.
+    // FIXME(gvisor.dev/issue/164): Succeeds on gVisor.
     EXPECT_THAT(ReadWhileExited("io", buf, sizeof(buf)),
                 SyscallFailsWithErrno(ESRCH));
   }
 
   if (!IsRunningOnGvisor()) {
-    // FIXME: Returns EOF on gVisor.
+    // FIXME(gvisor.dev/issue/164): Returns EOF on gVisor.
     EXPECT_THAT(ReadWhileExited("maps", buf, sizeof(buf)),
                 SyscallFailsWithErrno(ESRCH));
   }
 
   if (!IsRunningOnGvisor()) {
-    // FIXME: Succeeds on gVisor.
+    // FIXME(gvisor.dev/issue/164): Succeeds on gVisor.
     EXPECT_THAT(ReadWhileExited("stat", buf, sizeof(buf)),
                 SyscallFailsWithErrno(ESRCH));
   }
 
   if (!IsRunningOnGvisor()) {
-    // FIXME: Succeeds on gVisor.
+    // FIXME(gvisor.dev/issue/164): Succeeds on gVisor.
     EXPECT_THAT(ReadWhileExited("status", buf, sizeof(buf)),
                 SyscallFailsWithErrno(ESRCH));
   }
@@ -1835,6 +1867,92 @@ TEST(ProcSelfMounts, RequiredFieldsArePresent) {
                   // Root mount.
                   ContainsRegex(R"(\S+ /proc \S+ rw\S* [0-9]+ [0-9]+\s)")));
 }
+
+void CheckDuplicatesRecursively(std::string path) {
+  errno = 0;
+  DIR* dir = opendir(path.c_str());
+  if (dir == nullptr) {
+    ASSERT_THAT(errno, ::testing::AnyOf(EPERM, EACCES)) << path;
+    return;
+  }
+  auto dir_closer = Cleanup([&dir]() { closedir(dir); });
+  std::unordered_set<std::string> children;
+  while (true) {
+    // Readdir(3): If the end of the directory stream is reached, NULL is
+    // returned and errno is not changed.  If an error occurs, NULL is returned
+    // and errno is set appropriately.  To distinguish end of stream and from an
+    // error, set errno to zero before calling readdir() and then check the
+    // value of errno if NULL is returned.
+    errno = 0;
+    struct dirent* dp = readdir(dir);
+    if (dp == nullptr) {
+      ASSERT_EQ(errno, 0) << path;
+      break;  // We're done.
+    }
+
+    if (strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0) {
+      continue;
+    }
+
+    ASSERT_EQ(children.find(std::string(dp->d_name)), children.end()) << dp->d_name;
+    children.insert(std::string(dp->d_name));
+
+    ASSERT_NE(dp->d_type, DT_UNKNOWN);
+
+    if (dp->d_type != DT_DIR) {
+      continue;
+    }
+    CheckDuplicatesRecursively(absl::StrCat(path, "/", dp->d_name));
+  }
+}
+
+TEST(Proc, NoDuplicates) { CheckDuplicatesRecursively("/proc"); }
+
+// Most /proc/PID files are owned by the task user with SUID_DUMP_USER.
+TEST(ProcPid, UserDumpableOwner) {
+  int before;
+  ASSERT_THAT(before = prctl(PR_GET_DUMPABLE), SyscallSucceeds());
+  auto cleanup = Cleanup([before] {
+    ASSERT_THAT(prctl(PR_SET_DUMPABLE, before), SyscallSucceeds());
+  });
+
+  EXPECT_THAT(prctl(PR_SET_DUMPABLE, SUID_DUMP_USER), SyscallSucceeds());
+
+  // This applies to the task directory itself and files inside.
+  struct stat st;
+  ASSERT_THAT(stat("/proc/self/", &st), SyscallSucceeds());
+  EXPECT_EQ(st.st_uid, geteuid());
+  EXPECT_EQ(st.st_gid, getegid());
+
+  ASSERT_THAT(stat("/proc/self/stat", &st), SyscallSucceeds());
+  EXPECT_EQ(st.st_uid, geteuid());
+  EXPECT_EQ(st.st_gid, getegid());
+}
+
+// /proc/PID files are owned by root with SUID_DUMP_DISABLE.
+TEST(ProcPid, RootDumpableOwner) {
+  int before;
+  ASSERT_THAT(before = prctl(PR_GET_DUMPABLE), SyscallSucceeds());
+  auto cleanup = Cleanup([before] {
+    ASSERT_THAT(prctl(PR_SET_DUMPABLE, before), SyscallSucceeds());
+  });
+
+  EXPECT_THAT(prctl(PR_SET_DUMPABLE, SUID_DUMP_DISABLE), SyscallSucceeds());
+
+  // This *does not* applies to the task directory itself (or other 0555
+  // directories), but does to files inside.
+  struct stat st;
+  ASSERT_THAT(stat("/proc/self/", &st), SyscallSucceeds());
+  EXPECT_EQ(st.st_uid, geteuid());
+  EXPECT_EQ(st.st_gid, getegid());
+
+  // This file is owned by root. Also allow nobody in case this test is running
+  // in a userns without root mapped.
+  ASSERT_THAT(stat("/proc/self/stat", &st), SyscallSucceeds());
+  EXPECT_THAT(st.st_uid, AnyOf(Eq(0), Eq(65534)));
+  EXPECT_THAT(st.st_gid, AnyOf(Eq(0), Eq(65534)));
+}
+
 }  // namespace
 }  // namespace testing
 }  // namespace gvisor

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -118,7 +118,7 @@ func NewWithFile(lower tcpip.LinkEndpointID, file *os.File, snapLen uint32) (tcp
 // logs the packet before forwarding to the actual dispatcher.
 func (e *endpoint) DeliverNetworkPacket(linkEP stack.LinkEndpoint, remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, vv buffer.VectorisedView) {
 	if atomic.LoadUint32(&LogPackets) == 1 && e.file == nil {
-		logPacket("recv", protocol, vv.First())
+		logPacket("recv", protocol, vv.First(), nil)
 	}
 	if e.file != nil && atomic.LoadUint32(&LogPacketsToFile) == 1 {
 		vs := vv.Views()
@@ -198,7 +198,7 @@ func (e *endpoint) GSOMaxSize() uint32 {
 // the request to the lower endpoint.
 func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, hdr buffer.Prependable, payload buffer.VectorisedView, protocol tcpip.NetworkProtocolNumber) *tcpip.Error {
 	if atomic.LoadUint32(&LogPackets) == 1 && e.file == nil {
-		logPacket("send", protocol, hdr.View())
+		logPacket("send", protocol, hdr.View(), gso)
 	}
 	if e.file != nil && atomic.LoadUint32(&LogPacketsToFile) == 1 {
 		hdrBuf := hdr.View()
@@ -240,16 +240,20 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, hdr buffer.Prepen
 	return e.lower.WritePacket(r, gso, hdr, payload, protocol)
 }
 
-func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, b buffer.View) {
+func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, b buffer.View, gso *stack.GSO) {
 	// Figure out the network layer info.
 	var transProto uint8
 	src := tcpip.Address("unknown")
 	dst := tcpip.Address("unknown")
 	id := 0
 	size := uint16(0)
+	var fragmentOffset uint16
+	var moreFragments bool
 	switch protocol {
 	case header.IPv4ProtocolNumber:
 		ipv4 := header.IPv4(b)
+		fragmentOffset = ipv4.FragmentOffset()
+		moreFragments = ipv4.Flags()&header.IPv4FlagMoreFragments == header.IPv4FlagMoreFragments
 		src = ipv4.SourceAddress()
 		dst = ipv4.DestinationAddress()
 		transProto = ipv4.Protocol()
@@ -290,29 +294,31 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, b buffer.Vie
 		transName = "icmp"
 		icmp := header.ICMPv4(b)
 		icmpType := "unknown"
-		switch icmp.Type() {
-		case header.ICMPv4EchoReply:
-			icmpType = "echo reply"
-		case header.ICMPv4DstUnreachable:
-			icmpType = "destination unreachable"
-		case header.ICMPv4SrcQuench:
-			icmpType = "source quench"
-		case header.ICMPv4Redirect:
-			icmpType = "redirect"
-		case header.ICMPv4Echo:
-			icmpType = "echo"
-		case header.ICMPv4TimeExceeded:
-			icmpType = "time exceeded"
-		case header.ICMPv4ParamProblem:
-			icmpType = "param problem"
-		case header.ICMPv4Timestamp:
-			icmpType = "timestamp"
-		case header.ICMPv4TimestampReply:
-			icmpType = "timestamp reply"
-		case header.ICMPv4InfoRequest:
-			icmpType = "info request"
-		case header.ICMPv4InfoReply:
-			icmpType = "info reply"
+		if fragmentOffset == 0 {
+			switch icmp.Type() {
+			case header.ICMPv4EchoReply:
+				icmpType = "echo reply"
+			case header.ICMPv4DstUnreachable:
+				icmpType = "destination unreachable"
+			case header.ICMPv4SrcQuench:
+				icmpType = "source quench"
+			case header.ICMPv4Redirect:
+				icmpType = "redirect"
+			case header.ICMPv4Echo:
+				icmpType = "echo"
+			case header.ICMPv4TimeExceeded:
+				icmpType = "time exceeded"
+			case header.ICMPv4ParamProblem:
+				icmpType = "param problem"
+			case header.ICMPv4Timestamp:
+				icmpType = "timestamp"
+			case header.ICMPv4TimestampReply:
+				icmpType = "timestamp reply"
+			case header.ICMPv4InfoRequest:
+				icmpType = "info request"
+			case header.ICMPv4InfoReply:
+				icmpType = "info reply"
+			}
 		}
 		log.Infof("%s %s %v -> %v %s len:%d id:%04x code:%d", prefix, transName, src, dst, icmpType, size, id, icmp.Code())
 		return
@@ -351,8 +357,10 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, b buffer.Vie
 	case header.UDPProtocolNumber:
 		transName = "udp"
 		udp := header.UDP(b)
-		srcPort = udp.SourcePort()
-		dstPort = udp.DestinationPort()
+		if fragmentOffset == 0 && len(udp) >= header.UDPMinimumSize {
+			srcPort = udp.SourcePort()
+			dstPort = udp.DestinationPort()
+		}
 		size -= header.UDPMinimumSize
 
 		details = fmt.Sprintf("xsum: 0x%x", udp.Checksum())
@@ -360,38 +368,44 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, b buffer.Vie
 	case header.TCPProtocolNumber:
 		transName = "tcp"
 		tcp := header.TCP(b)
-		offset := int(tcp.DataOffset())
-		if offset < header.TCPMinimumSize {
-			details += fmt.Sprintf("invalid packet: tcp data offset too small %d", offset)
-			break
-		}
-		if offset > len(tcp) {
-			details += fmt.Sprintf("invalid packet: tcp data offset %d larger than packet buffer length %d", offset, len(tcp))
-			break
-		}
-
-		srcPort = tcp.SourcePort()
-		dstPort = tcp.DestinationPort()
-		size -= uint16(offset)
-
-		// Initialize the TCP flags.
-		flags := tcp.Flags()
-		flagsStr := []byte("FSRPAU")
-		for i := range flagsStr {
-			if flags&(1<<uint(i)) == 0 {
-				flagsStr[i] = ' '
+		if fragmentOffset == 0 && len(tcp) >= header.TCPMinimumSize {
+			offset := int(tcp.DataOffset())
+			if offset < header.TCPMinimumSize {
+				details += fmt.Sprintf("invalid packet: tcp data offset too small %d", offset)
+				break
 			}
-		}
-		details = fmt.Sprintf("flags:0x%02x (%v) seqnum: %v ack: %v win: %v xsum:0x%x", flags, string(flagsStr), tcp.SequenceNumber(), tcp.AckNumber(), tcp.WindowSize(), tcp.Checksum())
-		if flags&header.TCPFlagSyn != 0 {
-			details += fmt.Sprintf(" options: %+v", header.ParseSynOptions(tcp.Options(), flags&header.TCPFlagAck != 0))
-		} else {
-			details += fmt.Sprintf(" options: %+v", tcp.ParsedOptions())
+			if offset > len(tcp) && !moreFragments {
+				details += fmt.Sprintf("invalid packet: tcp data offset %d larger than packet buffer length %d", offset, len(tcp))
+				break
+			}
+
+			srcPort = tcp.SourcePort()
+			dstPort = tcp.DestinationPort()
+			size -= uint16(offset)
+
+			// Initialize the TCP flags.
+			flags := tcp.Flags()
+			flagsStr := []byte("FSRPAU")
+			for i := range flagsStr {
+				if flags&(1<<uint(i)) == 0 {
+					flagsStr[i] = ' '
+				}
+			}
+			details = fmt.Sprintf("flags:0x%02x (%v) seqnum: %v ack: %v win: %v xsum:0x%x", flags, string(flagsStr), tcp.SequenceNumber(), tcp.AckNumber(), tcp.WindowSize(), tcp.Checksum())
+			if flags&header.TCPFlagSyn != 0 {
+				details += fmt.Sprintf(" options: %+v", header.ParseSynOptions(tcp.Options(), flags&header.TCPFlagAck != 0))
+			} else {
+				details += fmt.Sprintf(" options: %+v", tcp.ParsedOptions())
+			}
 		}
 
 	default:
 		log.Infof("%s %v -> %v unknown transport protocol: %d", prefix, src, dst, transProto)
 		return
+	}
+
+	if gso != nil {
+		details += fmt.Sprintf(" gso: %+v", gso)
 	}
 
 	log.Infof("%s %s %v:%v -> %v:%v len:%d id:%04x %s", prefix, transName, src, srcPort, dst, dstPort, size, id, details)

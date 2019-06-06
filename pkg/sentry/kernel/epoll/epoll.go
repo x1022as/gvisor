@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -98,12 +98,14 @@ func (p *pollEntry) WeakRefGone() {
 //
 // +stateify savable
 type EventPoll struct {
-	fsutil.FilePipeSeek      `state:"zerovalue"`
-	fsutil.FileNotDirReaddir `state:"zerovalue"`
-	fsutil.FileNoFsync       `state:"zerovalue"`
-	fsutil.FileNoopFlush     `state:"zerovalue"`
-	fsutil.FileNoMMap        `state:"zerovalue"`
-	fsutil.FileNoIoctl       `state:"zerovalue"`
+	fsutil.FilePipeSeek             `state:"zerovalue"`
+	fsutil.FileNotDirReaddir        `state:"zerovalue"`
+	fsutil.FileNoFsync              `state:"zerovalue"`
+	fsutil.FileNoopFlush            `state:"zerovalue"`
+	fsutil.FileNoIoctl              `state:"zerovalue"`
+	fsutil.FileNoMMap               `state:"zerovalue"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	// Wait queue is used to notify interested parties when the event poll
 	// object itself becomes readable or writable.
@@ -154,6 +156,8 @@ var cycleMu sync.Mutex
 func NewEventPoll(ctx context.Context) *fs.File {
 	// name matches fs/eventpoll.c:epoll_create1.
 	dirent := fs.NewDirent(anon.NewInode(ctx), fmt.Sprintf("anon_inode:[eventpoll]"))
+	// Release the initial dirent reference after NewFile takes a reference.
+	defer dirent.DecRef()
 	return fs.NewFile(ctx, dirent, fs.FileFlags{}, &EventPoll{
 		files: make(map[FileIdentifier]*pollEntry),
 	})

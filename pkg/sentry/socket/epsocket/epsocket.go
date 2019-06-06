@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -140,20 +140,26 @@ var Metrics = tcpip.Stats{
 		OutgoingPacketErrors:     mustCreateMetric("/netstack/ip/outgoing_packet_errors", "Total number of IP packets which failed to write to a link-layer endpoint."),
 	},
 	TCP: tcpip.TCPStats{
-		ActiveConnectionOpenings:  mustCreateMetric("/netstack/tcp/active_connection_openings", "Number of connections opened successfully via Connect."),
-		PassiveConnectionOpenings: mustCreateMetric("/netstack/tcp/passive_connection_openings", "Number of connections opened successfully via Listen."),
-		FailedConnectionAttempts:  mustCreateMetric("/netstack/tcp/failed_connection_attempts", "Number of calls to Connect or Listen (active and passive openings, respectively) that end in an error."),
-		ValidSegmentsReceived:     mustCreateMetric("/netstack/tcp/valid_segments_received", "Number of TCP segments received that the transport layer successfully parsed."),
-		InvalidSegmentsReceived:   mustCreateMetric("/netstack/tcp/invalid_segments_received", "Number of TCP segments received that the transport layer could not parse."),
-		SegmentsSent:              mustCreateMetric("/netstack/tcp/segments_sent", "Number of TCP segments sent."),
-		ResetsSent:                mustCreateMetric("/netstack/tcp/resets_sent", "Number of TCP resets sent."),
-		ResetsReceived:            mustCreateMetric("/netstack/tcp/resets_received", "Number of TCP resets received."),
-		Retransmits:               mustCreateMetric("/netstack/tcp/retransmits", "Number of TCP segments retransmitted."),
-		FastRecovery:              mustCreateMetric("/netstack/tcp/fast_recovery", "Number of times fast recovery was used to recover from packet loss."),
-		SACKRecovery:              mustCreateMetric("/netstack/tcp/sack_recovery", "Number of times SACK recovery was used to recover from packet loss."),
-		SlowStartRetransmits:      mustCreateMetric("/netstack/tcp/slow_start_retransmits", "Number of segments retransmitted in slow start mode."),
-		FastRetransmit:            mustCreateMetric("/netstack/tcp/fast_retransmit", "Number of TCP segments which were fast retransmitted."),
-		Timeouts:                  mustCreateMetric("/netstack/tcp/timeouts", "Number of times RTO expired."),
+		ActiveConnectionOpenings:           mustCreateMetric("/netstack/tcp/active_connection_openings", "Number of connections opened successfully via Connect."),
+		PassiveConnectionOpenings:          mustCreateMetric("/netstack/tcp/passive_connection_openings", "Number of connections opened successfully via Listen."),
+		ListenOverflowSynDrop:              mustCreateMetric("/netstack/tcp/listen_overflow_syn_drop", "Number of times the listen queue overflowed and a SYN was dropped."),
+		ListenOverflowAckDrop:              mustCreateMetric("/netstack/tcp/listen_overflow_ack_drop", "Number of times the listen queue overflowed and the final ACK in the handshake was dropped."),
+		ListenOverflowSynCookieSent:        mustCreateMetric("/netstack/tcp/listen_overflow_syn_cookie_sent", "Number of times a SYN cookie was sent."),
+		ListenOverflowSynCookieRcvd:        mustCreateMetric("/netstack/tcp/listen_overflow_syn_cookie_rcvd", "Number of times a SYN cookie was received."),
+		ListenOverflowInvalidSynCookieRcvd: mustCreateMetric("/netstack/tcp/listen_overflow_invalid_syn_cookie_rcvd", "Number of times an invalid SYN cookie was received."),
+		FailedConnectionAttempts:           mustCreateMetric("/netstack/tcp/failed_connection_attempts", "Number of calls to Connect or Listen (active and passive openings, respectively) that end in an error."),
+		ValidSegmentsReceived:              mustCreateMetric("/netstack/tcp/valid_segments_received", "Number of TCP segments received that the transport layer successfully parsed."),
+		InvalidSegmentsReceived:            mustCreateMetric("/netstack/tcp/invalid_segments_received", "Number of TCP segments received that the transport layer could not parse."),
+		SegmentsSent:                       mustCreateMetric("/netstack/tcp/segments_sent", "Number of TCP segments sent."),
+		ResetsSent:                         mustCreateMetric("/netstack/tcp/resets_sent", "Number of TCP resets sent."),
+		ResetsReceived:                     mustCreateMetric("/netstack/tcp/resets_received", "Number of TCP resets received."),
+		Retransmits:                        mustCreateMetric("/netstack/tcp/retransmits", "Number of TCP segments retransmitted."),
+		FastRecovery:                       mustCreateMetric("/netstack/tcp/fast_recovery", "Number of times fast recovery was used to recover from packet loss."),
+		SACKRecovery:                       mustCreateMetric("/netstack/tcp/sack_recovery", "Number of times SACK recovery was used to recover from packet loss."),
+		SlowStartRetransmits:               mustCreateMetric("/netstack/tcp/slow_start_retransmits", "Number of segments retransmitted in slow start mode."),
+		FastRetransmit:                     mustCreateMetric("/netstack/tcp/fast_retransmit", "Number of TCP segments which were fast retransmitted."),
+		Timeouts:                           mustCreateMetric("/netstack/tcp/timeouts", "Number of times RTO expired."),
+		ChecksumErrors:                     mustCreateMetric("/netstack/tcp/checksum_errors", "Number of segments dropped due to bad checksums."),
 	},
 	UDP: tcpip.UDPStats{
 		PacketsReceived:          mustCreateMetric("/netstack/udp/packets_received", "Number of UDP datagrams received via HandlePacket."),
@@ -209,11 +215,13 @@ type commonEndpoint interface {
 //
 // +stateify savable
 type SocketOperations struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 	socket.SendReceiveTimeout
 	*waiter.Queue
 
@@ -374,7 +382,7 @@ func (s *SocketOperations) Read(ctx context.Context, _ *fs.File, dst usermem.IOS
 	if dst.NumBytes() == 0 {
 		return 0, nil
 	}
-	n, _, _, _, err := s.nonBlockingRead(ctx, dst, false, false, false)
+	n, _, _, _, _, err := s.nonBlockingRead(ctx, dst, false, false, false)
 	if err == syserr.ErrWouldBlock {
 		return int64(n), syserror.ErrWouldBlock
 	}
@@ -606,7 +614,7 @@ func (s *SocketOperations) Shutdown(t *kernel.Task, how int) *syserr.Error {
 // GetSockOpt implements the linux syscall getsockopt(2) for sockets backed by
 // tcpip.Endpoint.
 func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name, outLen int) (interface{}, *syserr.Error) {
-	// TODO: Unlike other socket options, SO_TIMESTAMP is
+	// TODO(b/78348848): Unlike other socket options, SO_TIMESTAMP is
 	// implemented specifically for epsocket.SocketOperations rather than
 	// commonEndpoint. commonEndpoint should be extended to support socket
 	// options where the implementation is not shared, as unix sockets need
@@ -656,7 +664,7 @@ func GetSockOpt(t *kernel.Task, s socket.Socket, ep commonEndpoint, family int, 
 
 // getSockOptSocket implements GetSockOpt when level is SOL_SOCKET.
 func getSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, family int, skType transport.SockType, name, outLen int) (interface{}, *syserr.Error) {
-	// TODO: Stop rejecting short optLen values in getsockopt.
+	// TODO(b/124056281): Stop rejecting short optLen values in getsockopt.
 	switch name {
 	case linux.SO_TYPE:
 		if outLen < sizeOfInt32 {
@@ -781,13 +789,13 @@ func getSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, family
 		return int32(v), nil
 
 	case linux.SO_LINGER:
-		if outLen < syscall.SizeofLinger {
+		if outLen < linux.SizeOfLinger {
 			return nil, syserr.ErrInvalidArgument
 		}
-		return syscall.Linger{}, nil
+		return linux.Linger{}, nil
 
 	case linux.SO_SNDTIMEO:
-		// TODO: Linux allows shorter lengths for partial results.
+		// TODO(igudger): Linux allows shorter lengths for partial results.
 		if outLen < linux.SizeOfTimeval {
 			return nil, syserr.ErrInvalidArgument
 		}
@@ -795,7 +803,7 @@ func getSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, family
 		return linux.NsecToTimeval(s.SendTimeout()), nil
 
 	case linux.SO_RCVTIMEO:
-		// TODO: Linux allows shorter lengths for partial results.
+		// TODO(igudger): Linux allows shorter lengths for partial results.
 		if outLen < linux.SizeOfTimeval {
 			return nil, syserr.ErrInvalidArgument
 		}
@@ -892,7 +900,7 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 			return nil, syserr.TranslateNetstackError(err)
 		}
 
-		// TODO: Translate fields once they are added to
+		// TODO(b/64800844): Translate fields once they are added to
 		// tcpip.TCPInfoOption.
 		info := linux.TCPInfo{}
 
@@ -993,7 +1001,7 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfac
 // SetSockOpt implements the linux syscall setsockopt(2) for sockets backed by
 // tcpip.Endpoint.
 func (s *SocketOperations) SetSockOpt(t *kernel.Task, level int, name int, optVal []byte) *syserr.Error {
-	// TODO: Unlike other socket options, SO_TIMESTAMP is
+	// TODO(b/78348848): Unlike other socket options, SO_TIMESTAMP is
 	// implemented specifically for epsocket.SocketOperations rather than
 	// commonEndpoint. commonEndpoint should be extended to support socket
 	// options where the implementation is not shared, as unix sockets need
@@ -1122,6 +1130,33 @@ func setSockOptSocket(t *kernel.Task, s socket.Socket, ep commonEndpoint, name i
 			return syserr.ErrDomain
 		}
 		s.SetRecvTimeout(v.ToNsecCapped())
+		return nil
+
+	case linux.SO_OOBINLINE:
+		if len(optVal) < sizeOfInt32 {
+			return syserr.ErrInvalidArgument
+		}
+
+		v := usermem.ByteOrder.Uint32(optVal)
+
+		if v == 0 {
+			socket.SetSockOptEmitUnimplementedEvent(t, name)
+		}
+
+		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.OutOfBandInlineOption(v)))
+
+	case linux.SO_LINGER:
+		if len(optVal) < linux.SizeOfLinger {
+			return syserr.ErrInvalidArgument
+		}
+
+		var v linux.Linger
+		binary.Unmarshal(optVal[:linux.SizeOfLinger], usermem.ByteOrder, &v)
+
+		if v != (linux.Linger{}) {
+			socket.SetSockOptEmitUnimplementedEvent(t, name)
+		}
+
 		return nil
 
 	default:
@@ -1309,7 +1344,7 @@ func setSockOptIP(t *kernel.Task, ep commonEndpoint, name int, optVal []byte) *s
 
 		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.AddMembershipOption{
 			NIC: tcpip.NICID(req.InterfaceIndex),
-			// TODO: Change AddMembership to use the standard
+			// TODO(igudger): Change AddMembership to use the standard
 			// any address representation.
 			InterfaceAddr: tcpip.Address(req.InterfaceAddr[:]),
 			MulticastAddr: tcpip.Address(req.MulticastAddr[:]),
@@ -1323,7 +1358,7 @@ func setSockOptIP(t *kernel.Task, ep commonEndpoint, name int, optVal []byte) *s
 
 		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.RemoveMembershipOption{
 			NIC: tcpip.NICID(req.InterfaceIndex),
-			// TODO: Change DropMembership to use the standard
+			// TODO(igudger): Change DropMembership to use the standard
 			// any address representation.
 			InterfaceAddr: tcpip.Address(req.InterfaceAddr[:]),
 			MulticastAddr: tcpip.Address(req.MulticastAddr[:]),
@@ -1351,7 +1386,7 @@ func setSockOptIP(t *kernel.Task, ep commonEndpoint, name int, optVal []byte) *s
 		))
 
 	case linux.MCAST_JOIN_GROUP:
-		// FIXME: Implement MCAST_JOIN_GROUP.
+		// FIXME(b/124219304): Implement MCAST_JOIN_GROUP.
 		t.Kernel().EmitUnimplementedEvent(t)
 		return syserr.ErrInvalidArgument
 
@@ -1666,8 +1701,8 @@ func (s *SocketOperations) coalescingRead(ctx context.Context, dst usermem.IOSeq
 
 // nonBlockingRead issues a non-blocking read.
 //
-// TODO: Support timestamps for stream sockets.
-func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSequence, peek, trunc, senderRequested bool) (int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
+// TODO(b/78348848): Support timestamps for stream sockets.
+func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSequence, peek, trunc, senderRequested bool) (int, int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
 	isPacket := s.isPacketBased()
 
 	// Fast path for regular reads from stream (e.g., TCP) endpoints. Note
@@ -1683,14 +1718,14 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 		s.readMu.Lock()
 		n, err := s.coalescingRead(ctx, dst, trunc)
 		s.readMu.Unlock()
-		return n, nil, 0, socket.ControlMessages{}, err
+		return n, 0, nil, 0, socket.ControlMessages{}, err
 	}
 
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 
 	if err := s.fetchReadView(); err != nil {
-		return 0, nil, 0, socket.ControlMessages{}, err
+		return 0, 0, nil, 0, socket.ControlMessages{}, err
 	}
 
 	if !isPacket && peek && trunc {
@@ -1698,14 +1733,14 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 		// amount that could be read.
 		var rql tcpip.ReceiveQueueSizeOption
 		if err := s.Endpoint.GetSockOpt(&rql); err != nil {
-			return 0, nil, 0, socket.ControlMessages{}, syserr.TranslateNetstackError(err)
+			return 0, 0, nil, 0, socket.ControlMessages{}, syserr.TranslateNetstackError(err)
 		}
 		available := len(s.readView) + int(rql)
 		bufLen := int(dst.NumBytes())
 		if available < bufLen {
-			return available, nil, 0, socket.ControlMessages{}, nil
+			return available, 0, nil, 0, socket.ControlMessages{}, nil
 		}
-		return bufLen, nil, 0, socket.ControlMessages{}, nil
+		return bufLen, 0, nil, 0, socket.ControlMessages{}, nil
 	}
 
 	n, err := dst.CopyOut(ctx, s.readView)
@@ -1722,18 +1757,18 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 	if peek {
 		if l := len(s.readView); trunc && l > n {
 			// isPacket must be true.
-			return l, addr, addrLen, s.controlMessages(), syserr.FromError(err)
+			return l, linux.MSG_TRUNC, addr, addrLen, s.controlMessages(), syserr.FromError(err)
 		}
 
 		if isPacket || err != nil {
-			return int(n), addr, addrLen, s.controlMessages(), syserr.FromError(err)
+			return n, 0, addr, addrLen, s.controlMessages(), syserr.FromError(err)
 		}
 
 		// We need to peek beyond the first message.
 		dst = dst.DropFirst(n)
 		num, err := dst.CopyOutFrom(ctx, safemem.FromVecReaderFunc{func(dsts [][]byte) (int64, error) {
 			n, _, err := s.Endpoint.Peek(dsts)
-			// TODO: Handle peek timestamp.
+			// TODO(b/78348848): Handle peek timestamp.
 			if err != nil {
 				return int64(n), syserr.TranslateNetstackError(err).ToError()
 			}
@@ -1744,7 +1779,7 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 			// We got some data, so no need to return an error.
 			err = nil
 		}
-		return int(n), nil, 0, s.controlMessages(), syserr.FromError(err)
+		return n, 0, nil, 0, s.controlMessages(), syserr.FromError(err)
 	}
 
 	var msgLen int
@@ -1756,11 +1791,16 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 		s.readView.TrimFront(int(n))
 	}
 
-	if trunc {
-		return msgLen, addr, addrLen, s.controlMessages(), syserr.FromError(err)
+	var flags int
+	if msgLen > int(n) {
+		flags |= linux.MSG_TRUNC
 	}
 
-	return int(n), addr, addrLen, s.controlMessages(), syserr.FromError(err)
+	if trunc {
+		n = msgLen
+	}
+
+	return n, flags, addr, addrLen, s.controlMessages(), syserr.FromError(err)
 }
 
 func (s *SocketOperations) controlMessages() socket.ControlMessages {
@@ -1781,7 +1821,7 @@ func (s *SocketOperations) updateTimestamp() {
 
 // RecvMsg implements the linux syscall recvmsg(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (n int, senderAddr interface{}, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
+func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (n int, msgFlags int, senderAddr interface{}, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
 	trunc := flags&linux.MSG_TRUNC != 0
 	peek := flags&linux.MSG_PEEK != 0
 	dontWait := flags&linux.MSG_DONTWAIT != 0
@@ -1790,16 +1830,16 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 		// Stream sockets ignore the sender address.
 		senderRequested = false
 	}
-	n, senderAddr, senderAddrLen, controlMessages, err = s.nonBlockingRead(t, dst, peek, trunc, senderRequested)
+	n, msgFlags, senderAddr, senderAddrLen, controlMessages, err = s.nonBlockingRead(t, dst, peek, trunc, senderRequested)
 
 	if s.isPacketBased() && err == syserr.ErrClosedForReceive && flags&linux.MSG_DONTWAIT != 0 {
 		// In this situation we should return EAGAIN.
-		return 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
+		return 0, 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
 	}
 
 	if err != nil && (err != syserr.ErrWouldBlock || dontWait) {
 		// Read failed and we should not retry.
-		return 0, nil, 0, socket.ControlMessages{}, err
+		return 0, 0, nil, 0, socket.ControlMessages{}, err
 	}
 
 	if err == nil && (dontWait || !waitAll || s.isPacketBased() || int64(n) >= dst.NumBytes()) {
@@ -1818,7 +1858,7 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 
 	for {
 		var rn int
-		rn, senderAddr, senderAddrLen, controlMessages, err = s.nonBlockingRead(t, dst, peek, trunc, senderRequested)
+		rn, msgFlags, senderAddr, senderAddrLen, controlMessages, err = s.nonBlockingRead(t, dst, peek, trunc, senderRequested)
 		n += rn
 		if err != nil && err != syserr.ErrWouldBlock {
 			// Always stop on errors other than would block as we generally
@@ -1837,12 +1877,12 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 
 		if err := t.BlockWithDeadline(ch, haveDeadline, deadline); err != nil {
 			if n > 0 {
-				return n, senderAddr, senderAddrLen, controlMessages, nil
+				return n, msgFlags, senderAddr, senderAddrLen, controlMessages, nil
 			}
 			if err == syserror.ETIMEDOUT {
-				return 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
+				return 0, 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
 			}
-			return 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
+			return 0, 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
 		}
 	}
 }
@@ -1929,7 +1969,7 @@ func (s *SocketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 func (s *SocketOperations) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
 	// SIOCGSTAMP is implemented by epsocket rather than all commonEndpoint
 	// sockets.
-	// TODO: Add a commonEndpoint method to support SIOCGSTAMP.
+	// TODO(b/78348848): Add a commonEndpoint method to support SIOCGSTAMP.
 	if int(args[1].Int()) == syscall.SIOCGSTAMP {
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
@@ -2119,19 +2159,19 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 
 	case syscall.SIOCGIFMAP:
 		// Gets the hardware parameters of the device.
-		// TODO: Implement.
+		// TODO(b/71872867): Implement.
 
 	case syscall.SIOCGIFTXQLEN:
 		// Gets the transmit queue length of the device.
-		// TODO: Implement.
+		// TODO(b/71872867): Implement.
 
 	case syscall.SIOCGIFDSTADDR:
 		// Gets the destination address of a point-to-point device.
-		// TODO: Implement.
+		// TODO(b/71872867): Implement.
 
 	case syscall.SIOCGIFBRDADDR:
 		// Gets the broadcast address of a device.
-		// TODO: Implement.
+		// TODO(b/71872867): Implement.
 
 	case syscall.SIOCGIFNETMASK:
 		// Gets the network mask of a device.

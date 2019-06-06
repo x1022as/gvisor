@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #include "test/syscalls/linux/socket_generic.h"
 #include "test/syscalls/linux/socket_test_util.h"
 #include "test/syscalls/linux/socket_unix.h"
+#include "test/syscalls/linux/socket_unix_cmsg.h"
 #include "test/syscalls/linux/unix_domain_socket_test_util.h"
 #include "test/util/test_util.h"
 
@@ -30,12 +31,16 @@ std::vector<SocketPairKind> GetSocketPairs() {
                              List<int>{0, SOCK_NONBLOCK}));
 }
 
-INSTANTIATE_TEST_CASE_P(
-    AllUnixDomainSockets, AllSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    FilesystemUnixSockets, AllSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
 
-INSTANTIATE_TEST_CASE_P(
-    AllUnixDomainSockets, UnixSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    FilesystemUnixSockets, UnixSocketPairTest,
+    ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
+
+INSTANTIATE_TEST_SUITE_P(
+    FilesystemUnixSockets, UnixSocketPairCmsgTest,
     ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
 
 }  // namespace testing

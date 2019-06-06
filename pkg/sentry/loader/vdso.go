@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,14 +52,16 @@ func (f *fileContext) Value(key interface{}) interface{} {
 
 // byteReader implements fs.FileOperations for reading from a []byte source.
 type byteReader struct {
-	waiter.AlwaysReady       `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoopRelease   `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FilePipeSeek      `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 
 	data []byte
 }
@@ -193,7 +195,7 @@ func validateVDSO(ctx context.Context, f *fs.File, size uint64) (elfInfo, error)
 
 // VDSO describes a VDSO.
 //
-// NOTE: to support multiple architectures or operating systems, this
+// NOTE(mpratt): to support multiple architectures or operating systems, this
 // would need to contain a VDSO for each.
 //
 // +stateify savable
@@ -261,8 +263,9 @@ func PrepareVDSO(mfp pgalloc.MemoryFileProvider) (*VDSO, error) {
 
 	return &VDSO{
 		ParamPage: mm.NewSpecialMappable("[vvar]", mfp, paramPage),
-		// TODO: Don't advertise the VDSO, as some applications may
-		// not be able to handle multiple [vdso] hints.
+		// TODO(gvisor.dev/issue/157): Don't advertise the VDSO, as
+		// some applications may not be able to handle multiple [vdso]
+		// hints.
 		vdso:  mm.NewSpecialMappable("", mfp, vdso),
 		phdrs: info.phdrs,
 	}, nil
@@ -277,7 +280,7 @@ func PrepareVDSO(mfp pgalloc.MemoryFileProvider) (*VDSO, error) {
 // kernel simply directly maps the entire file into process memory, with very
 // little real ELF parsing.
 //
-// NOTE: This means that userspace can, and unfortunately does,
+// NOTE(b/25323870): This means that userspace can, and unfortunately does,
 // depend on parts of the ELF that would normally not be mapped.  To maintain
 // compatibility with such binaries, we load the VDSO much like Linux.
 //

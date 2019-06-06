@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -93,10 +93,10 @@ func (i *Inode) DecRef() {
 
 // destroy releases the Inode and releases the msrc reference taken.
 func (i *Inode) destroy() {
-	// FIXME: Context is not plumbed here.
+	// FIXME(b/38173783): Context is not plumbed here.
 	ctx := context.Background()
 	if err := i.WriteOut(ctx); err != nil {
-		// FIXME: Mark as warning again once noatime is
+		// FIXME(b/65209558): Mark as warning again once noatime is
 		// properly supported.
 		log.Debugf("Inode %+v, failed to sync all metadata: %v", i.StableAttr, err)
 	}
@@ -216,7 +216,7 @@ func (i *Inode) Rename(ctx context.Context, oldParent *Dirent, renamed *Dirent, 
 	if i.overlay != nil {
 		return overlayRename(ctx, i.overlay, oldParent, renamed, newParent, newName, replacement)
 	}
-	return i.InodeOperations.Rename(ctx, oldParent.Inode, renamed.name, newParent.Inode, newName, replacement)
+	return i.InodeOperations.Rename(ctx, renamed.Inode, oldParent.Inode, renamed.name, newParent.Inode, newName, replacement)
 }
 
 // Bind calls i.InodeOperations.Bind with i as the directory.
@@ -253,7 +253,7 @@ func (i *Inode) UnstableAttr(ctx context.Context) (UnstableAttr, error) {
 }
 
 // Getxattr calls i.InodeOperations.Getxattr with i as the Inode.
-func (i *Inode) Getxattr(name string) ([]byte, error) {
+func (i *Inode) Getxattr(name string) (string, error) {
 	if i.overlay != nil {
 		return overlayGetxattr(i.overlay, name)
 	}
@@ -340,6 +340,13 @@ func (i *Inode) Truncate(ctx context.Context, d *Dirent, size int64) error {
 	return i.InodeOperations.Truncate(ctx, i, size)
 }
 
+func (i *Inode) Allocate(ctx context.Context, d *Dirent, offset int64, length int64) error {
+	if i.overlay != nil {
+		return overlayAllocate(ctx, i.overlay, d, offset, length)
+	}
+	return i.InodeOperations.Allocate(ctx, i, offset, length)
+}
+
 // Readlink calls i.InodeOperations.Readlnk with i as the Inode.
 func (i *Inode) Readlink(ctx context.Context) (string, error) {
 	if i.overlay != nil {
@@ -359,7 +366,7 @@ func (i *Inode) Getlink(ctx context.Context) (*Dirent, error) {
 // AddLink calls i.InodeOperations.AddLink.
 func (i *Inode) AddLink() {
 	if i.overlay != nil {
-		// FIXME: Remove this from InodeOperations altogether.
+		// FIXME(b/63117438): Remove this from InodeOperations altogether.
 		//
 		// This interface is only used by ramfs to update metadata of
 		// children. These filesystems should _never_ have overlay

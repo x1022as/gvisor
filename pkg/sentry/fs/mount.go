@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package fs
 import (
 	"bytes"
 	"fmt"
-	"sync"
 	"sync/atomic"
 
 	"gvisor.googlesource.com/gvisor/pkg/refs"
@@ -42,10 +41,6 @@ type DirentOperations interface {
 
 // MountSourceOperations contains filesystem specific operations.
 type MountSourceOperations interface {
-	// TODO: Add:
-	// BlockSize() int64
-	// FS() Filesystem
-
 	// DirentOperations provide optional extra management of Dirents.
 	DirentOperations
 
@@ -93,15 +88,7 @@ func (i InodeMappings) String() string {
 // one mount source. Each file object may only be represented using one inode
 // object in a sentry instance.
 //
-// This is an amalgamation of structs super_block, vfsmount, and mount, while
-// MountSourceOperations is akin to struct super_operations.
-//
-// Hence, mount source also contains common mounted file system state, such as
-// mount flags, the root Dirent, and children mounts. For now, this
-// amalgamation implies that a mount source cannot be shared by multiple mounts
-// (e.g. cannot be mounted at different locations).
-//
-// TODO: Move mount-specific information out of MountSource.
+// TODO(b/63601033): Move Flags out of MountSource to Mount.
 //
 // +stateify savable
 type MountSource struct {
@@ -110,16 +97,15 @@ type MountSource struct {
 	// MountSourceOperations defines filesystem specific behavior.
 	MountSourceOperations
 
-	// Filesystem is the filesystem backing the mount. Can be nil if there
-	// is no filesystem backing the mount.
-	Filesystem Filesystem
+	// FilesystemType is the type of the filesystem backing this mount.
+	FilesystemType string
 
 	// Flags are the flags that this filesystem was mounted with.
 	Flags MountSourceFlags
 
 	// fscache keeps Dirents pinned beyond application references to them.
 	// It must be flushed before kernel.SaveTo.
-	fscache *DirentCache `state:"nosave"`
+	fscache *DirentCache
 
 	// direntRefs is the sum of references on all Dirents in this MountSource.
 	//
@@ -133,83 +119,25 @@ type MountSource struct {
 	//
 	// direntRefs must be atomically changed.
 	direntRefs uint64
-
-	// mu protects the fields below, which are set by the MountNamespace
-	// during MountSource/Unmount.
-	mu sync.Mutex `state:"nosave"`
-
-	// id is a unique id for this mount.
-	id uint64
-
-	// root is the root Dirent of this mount.
-	root *Dirent
-
-	// parent is the parent MountSource, or nil if this MountSource is the root.
-	parent *MountSource
-
-	// children are the child MountSources of this MountSource.
-	children map[*MountSource]struct{}
 }
 
-// defaultDirentCacheSize is the number of Dirents that the VFS can hold an extra
-// reference on.
-const defaultDirentCacheSize uint64 = 1000
+// DefaultDirentCacheSize is the number of Dirents that the VFS can hold an
+// extra reference on.
+const DefaultDirentCacheSize uint64 = 1000
 
 // NewMountSource returns a new MountSource. Filesystem may be nil if there is no
 // filesystem backing the mount.
 func NewMountSource(mops MountSourceOperations, filesystem Filesystem, flags MountSourceFlags) *MountSource {
+	fsType := "none"
+	if filesystem != nil {
+		fsType = filesystem.Name()
+	}
 	return &MountSource{
 		MountSourceOperations: mops,
 		Flags:                 flags,
-		Filesystem:            filesystem,
-		fscache:               NewDirentCache(defaultDirentCacheSize),
-		children:              make(map[*MountSource]struct{}),
+		FilesystemType:        fsType,
+		fscache:               NewDirentCache(DefaultDirentCacheSize),
 	}
-}
-
-// Parent returns the parent mount, or nil if this mount is the root.
-func (msrc *MountSource) Parent() *MountSource {
-	msrc.mu.Lock()
-	defer msrc.mu.Unlock()
-	return msrc.parent
-}
-
-// ID returns the ID of this mount.
-func (msrc *MountSource) ID() uint64 {
-	msrc.mu.Lock()
-	defer msrc.mu.Unlock()
-	return msrc.id
-}
-
-// Children returns the (immediate) children of this MountSource.
-func (msrc *MountSource) Children() []*MountSource {
-	msrc.mu.Lock()
-	defer msrc.mu.Unlock()
-
-	ms := make([]*MountSource, 0, len(msrc.children))
-	for c := range msrc.children {
-		ms = append(ms, c)
-	}
-	return ms
-}
-
-// Submounts returns all mounts that are descendants of this mount.
-func (msrc *MountSource) Submounts() []*MountSource {
-	var ms []*MountSource
-	for _, c := range msrc.Children() {
-		ms = append(ms, c)
-		ms = append(ms, c.Submounts()...)
-	}
-	return ms
-}
-
-// Root returns the root dirent of this mount. Callers must call DecRef on the
-// returned dirent.
-func (msrc *MountSource) Root() *Dirent {
-	msrc.mu.Lock()
-	defer msrc.mu.Unlock()
-	msrc.root.IncRef()
-	return msrc.root
 }
 
 // DirentRefs returns the current mount direntRefs.
@@ -244,6 +172,18 @@ func (msrc *MountSource) DecRef() {
 // FlushDirentRefs drops all references held by the MountSource on Dirents.
 func (msrc *MountSource) FlushDirentRefs() {
 	msrc.fscache.Invalidate()
+}
+
+// SetDirentCacheMaxSize sets the max size to the dirent cache associated with
+// this mount source.
+func (msrc *MountSource) SetDirentCacheMaxSize(max uint64) {
+	msrc.fscache.setMaxSize(max)
+}
+
+// SetDirentCacheLimiter sets the limiter objcet to the dirent cache associated
+// with this mount source.
+func (msrc *MountSource) SetDirentCacheLimiter(l *DirentCacheLimiter) {
+	msrc.fscache.limit = l
 }
 
 // NewCachingMountSource returns a generic mount that will cache dirents

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 #include "test/util/logging.h"
 #include "test/util/multiprocess_util.h"
 #include "test/util/test_util.h"
+#include "test/util/time_util.h"
 
 DEFINE_bool(vfork_test_child, false,
             "If true, run the VforkTest child workload.");

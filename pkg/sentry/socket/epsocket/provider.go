@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,9 +70,13 @@ func getTransportProtocol(ctx context.Context, stype transport.SockType, protoco
 		switch protocol {
 		case syscall.IPPROTO_ICMP:
 			return header.ICMPv4ProtocolNumber, nil
+		case syscall.IPPROTO_UDP:
+			return header.UDPProtocolNumber, nil
+		case syscall.IPPROTO_TCP:
+			return header.TCPProtocolNumber, nil
 		}
 	}
-	return 0, syserr.ErrInvalidArgument
+	return 0, syserr.ErrProtocolNotSupported
 }
 
 // Socket creates a new socket object for the AF_INET or AF_INET6 family.

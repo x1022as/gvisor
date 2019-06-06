@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -152,8 +152,8 @@ type Args struct {
 	Conf *Config
 	// ControllerFD is the FD to the URPC controller.
 	ControllerFD int
-	// DeviceFD is an optional argument that is passed to the platform.
-	DeviceFD int
+	// Device is an optional argument that is passed to the platform.
+	Device *os.File
 	// GoferFDs is an array of FDs used to connect with the Gofer.
 	GoferFDs []int
 	// StdioFDs is the stdio for the application.
@@ -183,7 +183,7 @@ func New(args Args) (*Loader, error) {
 	}
 
 	// Create kernel and platform.
-	p, err := createPlatform(args.Conf, args.DeviceFD)
+	p, err := createPlatform(args.Conf, args.Device)
 	if err != nil {
 		return nil, fmt.Errorf("creating platform: %v", err)
 	}
@@ -227,7 +227,7 @@ func New(args Args) (*Loader, error) {
 	}
 
 	// Create capabilities.
-	caps, err := specutils.Capabilities(args.Spec.Process.Capabilities)
+	caps, err := specutils.Capabilities(args.Conf.EnableRaw, args.Spec.Process.Capabilities)
 	if err != nil {
 		return nil, fmt.Errorf("converting capabilities: %v", err)
 	}
@@ -274,6 +274,10 @@ func New(args Args) (*Loader, error) {
 		return nil, fmt.Errorf("initializing kernel: %v", err)
 	}
 
+	if err := adjustDirentCache(k); err != nil {
+		return nil, err
+	}
+
 	// Turn on packet logging if enabled.
 	if args.Conf.LogPackets {
 		log.Infof("Packet logging enabled")
@@ -284,7 +288,7 @@ func New(args Args) (*Loader, error) {
 	}
 
 	// Create a watchdog.
-	watchdog := watchdog.New(k, watchdog.DefaultTimeout, args.Conf.WatchdogAction)
+	dog := watchdog.New(k, watchdog.DefaultTimeout, args.Conf.WatchdogAction)
 
 	procArgs, err := newProcess(args.ID, args.Spec, creds, k)
 	if err != nil {
@@ -300,7 +304,7 @@ func New(args Args) (*Loader, error) {
 		k:            k,
 		conf:         args.Conf,
 		console:      args.Console,
-		watchdog:     watchdog,
+		watchdog:     dog,
 		spec:         args.Spec,
 		goferFDs:     args.GoferFDs,
 		stdioFDs:     args.StdioFDs,
@@ -397,17 +401,17 @@ func (l *Loader) Destroy() {
 	l.watchdog.Stop()
 }
 
-func createPlatform(conf *Config, deviceFD int) (platform.Platform, error) {
+func createPlatform(conf *Config, deviceFile *os.File) (platform.Platform, error) {
 	switch conf.Platform {
 	case PlatformPtrace:
 		log.Infof("Platform: ptrace")
 		return ptrace.New()
 	case PlatformKVM:
 		log.Infof("Platform: kvm")
-		if deviceFD < 0 {
-			return nil, fmt.Errorf("kvm device FD must be provided")
+		if deviceFile == nil {
+			return nil, fmt.Errorf("kvm device file must be provided")
 		}
-		return kvm.New(os.NewFile(uintptr(deviceFD), "kvm device"))
+		return kvm.New(deviceFile)
 	default:
 		return nil, fmt.Errorf("invalid platform %v", conf.Platform)
 	}
@@ -420,7 +424,7 @@ func createMemoryFile() (*pgalloc.MemoryFile, error) {
 		return nil, fmt.Errorf("error creating memfd: %v", err)
 	}
 	memfile := os.NewFile(uintptr(memfd), memfileName)
-	mf, err := pgalloc.NewMemoryFile(memfile)
+	mf, err := pgalloc.NewMemoryFile(memfile, pgalloc.MemoryFileOpts{})
 	if err != nil {
 		memfile.Close()
 		return nil, fmt.Errorf("error creating pgalloc.MemoryFile: %v", err)
@@ -428,7 +432,7 @@ func createMemoryFile() (*pgalloc.MemoryFile, error) {
 	return mf, nil
 }
 
-// Run runs the root container..
+// Run runs the root container.
 func (l *Loader) Run() error {
 	err := l.run()
 	l.ctrl.manager.startResultChan <- err
@@ -482,17 +486,21 @@ func (l *Loader) run() error {
 	// If we are restoring, we do not want to create a process.
 	// l.restore is set by the container manager when a restore call is made.
 	if !l.restore {
-		if err := setupContainerFS(
-			&l.rootProcArgs,
-			l.spec,
-			l.conf,
-			l.stdioFDs,
-			l.goferFDs,
-			l.console,
-			l.rootProcArgs.Credentials,
-			l.rootProcArgs.Limits,
-			l.k,
-			"" /* CID, which isn't needed for the root container */); err != nil {
+		// Create the FD map, which will set stdin, stdout, and stderr.  If console
+		// is true, then ioctl calls will be passed through to the host fd.
+		ctx := l.rootProcArgs.NewContext(l.k)
+		fdm, err := createFDMap(ctx, l.rootProcArgs.Limits, l.console, l.stdioFDs)
+		if err != nil {
+			return fmt.Errorf("importing fds: %v", err)
+		}
+		// CreateProcess takes a reference on FDMap if successful. We won't need
+		// ours either way.
+		l.rootProcArgs.FDMap = fdm
+
+		// cid for root container can be empty. Only subcontainers need it to set
+		// the mount location.
+		mntr := newContainerMounter(l.spec, "", l.goferFDs, l.k)
+		if err := mntr.setupFS(ctx, l.conf, &l.rootProcArgs, l.rootProcArgs.Credentials); err != nil {
 			return err
 		}
 
@@ -548,9 +556,9 @@ func (l *Loader) createContainer(cid string) error {
 // startContainer starts a child container. It returns the thread group ID of
 // the newly created process. Caller owns 'files' and may close them after
 // this method returns.
-func (l *Loader) startContainer(k *kernel.Kernel, spec *specs.Spec, conf *Config, cid string, files []*os.File) error {
+func (l *Loader) startContainer(spec *specs.Spec, conf *Config, cid string, files []*os.File) error {
 	// Create capabilities.
-	caps, err := specutils.Capabilities(spec.Process.Capabilities)
+	caps, err := specutils.Capabilities(conf.EnableRaw, spec.Process.Capabilities)
 	if err != nil {
 		return fmt.Errorf("creating capabilities: %v", err)
 	}
@@ -573,7 +581,7 @@ func (l *Loader) startContainer(k *kernel.Kernel, spec *specs.Spec, conf *Config
 	// sentry currently supports only 1 mount namespace, which is tied to a
 	// single user namespace. Thus we must run in the same user namespace
 	// to access mounts.
-	// TODO: Create a new mount namespace for the container.
+	// TODO(b/63601033): Create a new mount namespace for the container.
 	creds := auth.NewUserCredentials(
 		auth.KUID(spec.Process.User.UID),
 		auth.KGID(spec.Process.User.GID),
@@ -586,41 +594,38 @@ func (l *Loader) startContainer(k *kernel.Kernel, spec *specs.Spec, conf *Config
 		return fmt.Errorf("creating new process: %v", err)
 	}
 
+	// setupContainerFS() dups stdioFDs, so we don't need to dup them here.
+	var stdioFDs []int
+	for _, f := range files[:3] {
+		stdioFDs = append(stdioFDs, int(f.Fd()))
+	}
+
+	// Create the FD map, which will set stdin, stdout, and stderr.
+	ctx := procArgs.NewContext(l.k)
+	fdm, err := createFDMap(ctx, procArgs.Limits, false, stdioFDs)
+	if err != nil {
+		return fmt.Errorf("importing fds: %v", err)
+	}
+	// CreateProcess takes a reference on FDMap if successful. We won't need ours
+	// either way.
+	procArgs.FDMap = fdm
+
 	// Can't take ownership away from os.File. dup them to get a new FDs.
-	var ioFDs []int
-	for _, f := range files {
+	var goferFDs []int
+	for _, f := range files[3:] {
 		fd, err := syscall.Dup(int(f.Fd()))
 		if err != nil {
 			return fmt.Errorf("failed to dup file: %v", err)
 		}
-		ioFDs = append(ioFDs, fd)
+		goferFDs = append(goferFDs, fd)
 	}
 
-	stdioFDs := ioFDs[:3]
-	goferFDs := ioFDs[3:]
-	if err := setupContainerFS(
-		&procArgs,
-		spec,
-		conf,
-		stdioFDs,
-		goferFDs,
-		false,
-		creds,
-		procArgs.Limits,
-		k,
-		cid); err != nil {
+	mntr := newContainerMounter(spec, cid, goferFDs, l.k)
+	if err := mntr.setupFS(ctx, conf, &procArgs, creds); err != nil {
 		return fmt.Errorf("configuring container FS: %v", err)
 	}
 
-	// setFileSystemForProcess dup'd stdioFDs, so we can close them.
-	for i, fd := range stdioFDs {
-		if err := syscall.Close(fd); err != nil {
-			return fmt.Errorf("closing stdio FD #%d: %v", i, fd)
-		}
-	}
-
-	ctx := procArgs.NewContext(l.k)
-	mns := k.RootMountNamespace()
+	mns := l.k.RootMountNamespace()
 	if err := setExecutablePath(ctx, mns, &procArgs); err != nil {
 		return fmt.Errorf("setting executable path for %+v: %v", procArgs, err)
 	}
@@ -723,7 +728,7 @@ func (l *Loader) waitContainer(cid string, waitStatus *uint32) error {
 	return nil
 }
 
-func (l *Loader) waitPID(tgid kernel.ThreadID, cid string, clearStatus bool, waitStatus *uint32) error {
+func (l *Loader) waitPID(tgid kernel.ThreadID, cid string, waitStatus *uint32) error {
 	if tgid <= 0 {
 		return fmt.Errorf("PID (%d) must be positive", tgid)
 	}
@@ -735,13 +740,10 @@ func (l *Loader) waitPID(tgid kernel.ThreadID, cid string, clearStatus bool, wai
 		ws := l.wait(execTG)
 		*waitStatus = ws
 
-		// Remove tg from the cache if caller requested it.
-		if clearStatus {
-			l.mu.Lock()
-			delete(l.processes, eid)
-			log.Debugf("updated processes (removal): %v", l.processes)
-			l.mu.Unlock()
-		}
+		l.mu.Lock()
+		delete(l.processes, eid)
+		log.Debugf("updated processes (removal): %v", l.processes)
+		l.mu.Unlock()
 		return nil
 	}
 
@@ -796,6 +798,9 @@ func newEmptyNetworkStack(conf *Config, clock tcpip.Clock) (inet.Stack, error) {
 			Clock:       clock,
 			Stats:       epsocket.Metrics,
 			HandleLocal: true,
+			// Enable raw sockets for users with sufficient
+			// privileges.
+			Raw: true,
 		})}
 		if err := s.Stack.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(true)); err != nil {
 			return nil, fmt.Errorf("failed to enable SACK: %v", err)

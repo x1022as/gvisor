@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ func (s *Stack) InterfaceAddrs() map[int32][]inet.InterfaceAddr {
 				Family:    family,
 				PrefixLen: uint8(len(a.Address) * 8),
 				Addr:      []byte(a.Address),
-				// TODO: Other fields.
+				// TODO(b/68878065): Other fields.
 			})
 		}
 		nicAddrs[int32(id)] = addrs

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import (
 
 // afterLoad is invoked by stateify.
 func (s *Stack) afterLoad() {
-	s.Stack = stack.StackFromEnv // FIXME
+	s.Stack = stack.StackFromEnv // FIXME(b/36201077)
 	if s.Stack == nil {
 		panic("can't restore without netstack/tcpip/stack.Stack")
 	}

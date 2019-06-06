@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -46,8 +46,9 @@ var (
 //
 // +stateify savable
 type fileOperations struct {
-	fsutil.FileNoIoctl `state:"nosave"`
-	waiter.AlwaysReady `state:"nosave"`
+	fsutil.FileNoIoctl  `state:"nosave"`
+	fsutil.FileNoSplice `state:"nosplice"`
+	waiter.AlwaysReady  `state:"nosave"`
 
 	// inodeOperations is the inodeOperations backing the file. It is protected
 	// by a reference held by File.Dirent.Inode which is stable until
@@ -120,7 +121,9 @@ func (f *fileOperations) Release() {
 // Readdir implements fs.FileOperations.Readdir.
 func (f *fileOperations) Readdir(ctx context.Context, file *fs.File, serializer fs.DentrySerializer) (int64, error) {
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 
 	dirCtx := &fs.DirCtx{
 		Serializer: serializer,
@@ -295,7 +298,7 @@ func (f *fileOperations) Flush(ctx context.Context, file *fs.File) error {
 	// We do this because some p9 server implementations of Flush are
 	// over-zealous.
 	//
-	// FIXME: weaken these implementations and remove this check.
+	// FIXME(edahlgren): weaken these implementations and remove this check.
 	if !file.Flags().Write {
 		return nil
 	}
@@ -306,6 +309,22 @@ func (f *fileOperations) Flush(ctx context.Context, file *fs.File) error {
 // ConfigureMMap implements fs.FileOperations.ConfigureMMap.
 func (f *fileOperations) ConfigureMMap(ctx context.Context, file *fs.File, opts *memmap.MMapOpts) error {
 	return f.inodeOperations.configureMMap(file, opts)
+}
+
+// UnstableAttr implements fs.FileOperations.UnstableAttr.
+func (f *fileOperations) UnstableAttr(ctx context.Context, file *fs.File) (fs.UnstableAttr, error) {
+	s := f.inodeOperations.session()
+	if s.cachePolicy.cacheUAttrs(file.Dirent.Inode) {
+		return f.inodeOperations.cachingInodeOps.UnstableAttr(ctx, file.Dirent.Inode)
+	}
+	// Use f.handles.File, which represents 9P fids that have been opened,
+	// instead of inodeFileState.file, which represents 9P fids that have not.
+	// This may be significantly more efficient in some implementations.
+	_, valid, pattr, err := getattr(ctx, f.handles.File)
+	if err != nil {
+		return fs.UnstableAttr{}, err
+	}
+	return unstable(ctx, valid, pattr, s.mounter, s.client), nil
 }
 
 // Seek implements fs.FileOperations.Seek.

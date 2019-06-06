@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import (
 
 // forEachMountSource runs f for the process root mount and  each mount that is a
 // descendant of the root.
-func forEachMountSource(t *kernel.Task, fn func(string, *fs.MountSource)) {
+func forEachMount(t *kernel.Task, fn func(string, *fs.Mount)) {
 	var fsctx *kernel.FSContext
 	t.WithMuLocked(func(t *kernel.Task) {
 		fsctx = t.FSContext()
@@ -46,16 +46,14 @@ func forEachMountSource(t *kernel.Task, fn func(string, *fs.MountSource)) {
 	}
 	defer rootDir.DecRef()
 
-	if rootDir.Inode == nil {
-		panic(fmt.Sprintf("root dirent has nil inode: %+v", rootDir))
+	mnt := t.MountNamespace().FindMount(rootDir)
+	if mnt == nil {
+		// Has it just been unmounted?
+		return
 	}
-	if rootDir.Inode.MountSource == nil {
-		panic(fmt.Sprintf("root dirent has nil mount: %+v", rootDir))
-	}
-
-	ms := append(rootDir.Inode.MountSource.Submounts(), rootDir.Inode.MountSource)
+	ms := t.MountNamespace().AllMountsUnder(mnt)
 	sort.Slice(ms, func(i, j int) bool {
-		return ms[i].ID() < ms[j].ID()
+		return ms[i].ID < ms[j].ID
 	})
 	for _, m := range ms {
 		mroot := m.Root()
@@ -89,32 +87,33 @@ func (mif *mountInfoFile) ReadSeqFileData(ctx context.Context, handle seqfile.Se
 	}
 
 	var buf bytes.Buffer
-	forEachMountSource(mif.t, func(mountPath string, m *fs.MountSource) {
+	forEachMount(mif.t, func(mountPath string, m *fs.Mount) {
 		// Format:
 		// 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
 		// (1)(2)(3)   (4)   (5)      (6)      (7)   (8) (9)   (10)         (11)
 
 		// (1) MountSource ID.
-		fmt.Fprintf(&buf, "%d ", m.ID())
+		fmt.Fprintf(&buf, "%d ", m.ID)
 
 		// (2)  Parent ID (or this ID if there is no parent).
-		pID := m.ID()
-		if p := m.Parent(); p != nil {
-			pID = p.ID()
+		pID := m.ID
+		if !m.IsRoot() && !m.IsUndo() {
+			pID = m.ParentID
 		}
 		fmt.Fprintf(&buf, "%d ", pID)
 
 		// (3) Major:Minor device ID. We don't have a superblock, so we
 		// just use the root inode device number.
 		mroot := m.Root()
+		defer mroot.DecRef()
+
 		sa := mroot.Inode.StableAttr
-		mroot.DecRef()
 		fmt.Fprintf(&buf, "%d:%d ", sa.DeviceFileMajor, sa.DeviceFileMinor)
 
 		// (4) Root: the pathname of the directory in the filesystem
 		// which forms the root of this mount.
 		//
-		// NOTE: This will always be "/" until we implement
+		// NOTE(b/78135857): This will always be "/" until we implement
 		// bind mounts.
 		fmt.Fprintf(&buf, "/ ")
 
@@ -122,14 +121,15 @@ func (mif *mountInfoFile) ReadSeqFileData(ctx context.Context, handle seqfile.Se
 		fmt.Fprintf(&buf, "%s ", mountPath)
 
 		// (6) Mount options.
+		flags := mroot.Inode.MountSource.Flags
 		opts := "rw"
-		if m.Flags.ReadOnly {
+		if flags.ReadOnly {
 			opts = "ro"
 		}
-		if m.Flags.NoAtime {
+		if flags.NoAtime {
 			opts += ",noatime"
 		}
-		if m.Flags.NoExec {
+		if flags.NoExec {
 			opts += ",noexec"
 		}
 		fmt.Fprintf(&buf, "%s ", opts)
@@ -139,11 +139,7 @@ func (mif *mountInfoFile) ReadSeqFileData(ctx context.Context, handle seqfile.Se
 		fmt.Fprintf(&buf, "- ")
 
 		// (9) Filesystem type.
-		name := "none"
-		if m.Filesystem != nil {
-			name = m.Filesystem.Name()
-		}
-		fmt.Fprintf(&buf, "%s ", name)
+		fmt.Fprintf(&buf, "%s ", mroot.Inode.MountSource.FilesystemType)
 
 		// (10) Mount source: filesystem-specific information or "none".
 		fmt.Fprintf(&buf, "none ")
@@ -175,7 +171,7 @@ func (mf *mountsFile) ReadSeqFileData(ctx context.Context, handle seqfile.SeqHan
 	}
 
 	var buf bytes.Buffer
-	forEachMountSource(mf.t, func(mountPath string, m *fs.MountSource) {
+	forEachMount(mf.t, func(mountPath string, m *fs.Mount) {
 		// Format:
 		// <special device or remote filesystem> <mount point> <filesystem type> <mount options> <needs dump> <fsck order>
 		//
@@ -186,15 +182,15 @@ func (mf *mountsFile) ReadSeqFileData(ctx context.Context, handle seqfile.SeqHan
 		// Only ro/rw option is supported for now.
 		//
 		// The "needs dump"and fsck flags are always 0, which is allowed.
+		root := m.Root()
+		defer root.DecRef()
+
+		flags := root.Inode.MountSource.Flags
 		opts := "rw"
-		if m.Flags.ReadOnly {
+		if flags.ReadOnly {
 			opts = "ro"
 		}
-		name := "none"
-		if m.Filesystem != nil {
-			name = m.Filesystem.Name()
-		}
-		fmt.Fprintf(&buf, "%s %s %s %s %d %d\n", "none", mountPath, name, opts, 0, 0)
+		fmt.Fprintf(&buf, "%s %s %s %s %d %d\n", "none", mountPath, root.Inode.MountSource.FilesystemType, opts, 0, 0)
 	})
 
 	return []seqfile.SeqData{{Buf: buf.Bytes(), Handle: (*mountsFile)(nil)}}, 0

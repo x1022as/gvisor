@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -279,7 +279,7 @@ TEST_F(OpenTest, Null) {
   ASSERT_THAT(open(&c, O_RDONLY), SyscallFailsWithErrno(ENOENT));
 }
 
-// NOTE: While the man pages specify that this behavior should be
+// NOTE(b/119785738): While the man pages specify that this behavior should be
 // undefined, Linux truncates the file on opening read only if we have write
 // permission, so we will too.
 TEST_F(OpenTest, CanTruncateReadOnly) {

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,8 +16,6 @@ package tcp
 
 import (
 	"sync"
-
-	"gvisor.googlesource.com/gvisor/pkg/tcpip/header"
 )
 
 // segmentQueue is a bounded, thread-safe queue of TCP segments.
@@ -58,7 +56,7 @@ func (q *segmentQueue) enqueue(s *segment) bool {
 	r := q.used < q.limit
 	if r {
 		q.list.PushBack(s)
-		q.used += s.data.Size() + header.TCPMinimumSize
+		q.used++
 	}
 	q.mu.Unlock()
 
@@ -73,7 +71,7 @@ func (q *segmentQueue) dequeue() *segment {
 	s := q.list.Front()
 	if s != nil {
 		q.list.Remove(s)
-		q.used -= s.data.Size() + header.TCPMinimumSize
+		q.used--
 	}
 	q.mu.Unlock()
 

@@ -226,7 +226,6 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/time",
-        "@com_google_glog//:glog",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -236,6 +235,16 @@ cc_library(
     testonly = 1,
     hdrs = ["thread_util.h"],
     deps = [":logging"],
+)
+
+cc_library(
+    name = "time_util",
+    testonly = 1,
+    srcs = ["time_util.cc"],
+    hdrs = ["time_util.h"],
+    deps = [
+        "@com_google_absl//absl/time",
+    ],
 )
 
 cc_library(

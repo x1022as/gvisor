@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -235,7 +235,7 @@ TEST(ChmodTest, FchmodFileToNoPermissionsSucceeds_NoRandomSave) {
 
 // Verify that we can get a RW FD after chmod, even if a RO fd is left open.
 TEST(ChmodTest, ChmodWritableWithOpenFD) {
-  // FIXME: broken on hostfs.
+  // FIXME(b/72455313): broken on hostfs.
   if (IsRunningOnGvisor()) {
     return;
   }

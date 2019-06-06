@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ const (
 
 // tcpMemInode is used to read/write the size of netstack tcp buffers.
 //
-// TODO: If we have multiple proc mounts, concurrent writes can
+// TODO(b/121381035): If we have multiple proc mounts, concurrent writes can
 // leave netstack and the proc files in an inconsistent state. Since we set the
 // buffer size from these proc files on restore, we may also race and end up in
 // an inconsistent state on restore.
@@ -85,14 +85,16 @@ func (m *tcpMemInode) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.F
 
 // +stateify savable
 type tcpMemFile struct {
-	waiter.AlwaysReady       `state:"nosave"`
-	fsutil.FileGenericSeek   `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoopRelease   `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoopFsync     `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileGenericSeek          `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoopFsync            `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 
 	tcpMemInode *tcpMemInode
 }
@@ -197,14 +199,16 @@ func (s *tcpSack) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileF
 
 // +stateify savable
 type tcpSackFile struct {
-	waiter.AlwaysReady       `state:"nosave"`
-	fsutil.FileGenericSeek   `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoopRelease   `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoopFsync     `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileGenericSeek          `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoopFsync            `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 
 	tcpSack *tcpSack
 

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 package linux
 
 import (
-	"io"
 	"syscall"
 
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
@@ -28,6 +27,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/fasync"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/kdefs"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/pipe"
 	ktime "gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/limits"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
@@ -259,7 +259,7 @@ func mknodAt(t *kernel.Task, dirFD kdefs.FD, addr usermem.Addr, mode linux.FileM
 		case linux.ModeCharacterDevice:
 			fallthrough
 		case linux.ModeBlockDevice:
-			// TODO: We don't support creating block or character
+			// TODO(b/72101894): We don't support creating block or character
 			// devices at the moment.
 			//
 			// When we start supporting block and character devices, we'll
@@ -347,10 +347,9 @@ func createAt(t *kernel.Task, dirFD kdefs.FD, addr usermem.Addr, flags uint, mod
 				return syserror.ConvertIntr(err, kernel.ERESTARTSYS)
 			}
 			defer newFile.DecRef()
-		case syserror.EACCES:
-			// Permission denied while walking to the file.
-			return err
-		default:
+		case syserror.ENOENT:
+			// File does not exist. Proceed with creation.
+
 			// Do we have write permissions on the parent?
 			if err := d.Inode.CheckPermission(t, fs.PermMask{Write: true, Execute: true}); err != nil {
 				return err
@@ -365,6 +364,8 @@ func createAt(t *kernel.Task, dirFD kdefs.FD, addr usermem.Addr, flags uint, mod
 			}
 			defer newFile.DecRef()
 			targetDirent = newFile.Dirent
+		default:
+			return err
 		}
 
 		// Success.
@@ -943,6 +944,19 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		}
 		err := tmpfs.AddSeals(file.Dirent.Inode, args[2].Uint())
 		return 0, nil, err
+	case linux.F_GETPIPE_SZ:
+		sz, ok := file.FileOperations.(pipe.Sizer)
+		if !ok {
+			return 0, nil, syserror.EINVAL
+		}
+		return uintptr(sz.PipeSize()), nil, nil
+	case linux.F_SETPIPE_SZ:
+		sz, ok := file.FileOperations.(pipe.Sizer)
+		if !ok {
+			return 0, nil, syserror.EINVAL
+		}
+		n, err := sz.SetPipeSize(int64(args[2].Int()))
+		return uintptr(n), nil, err
 	default:
 		// Everything else is not yet supported.
 		return 0, nil, syserror.EINVAL
@@ -1531,7 +1545,7 @@ func chown(t *kernel.Task, d *fs.Dirent, uid auth.UID, gid auth.GID) error {
 		owner.GID = kgid
 	}
 
-	// FIXME: This is racy; the inode's owner may have changed in
+	// FIXME(b/62949101): This is racy; the inode's owner may have changed in
 	// the meantime. (Linux holds i_mutex while calling
 	// fs/attr.c:notify_change() => inode_operations::setattr =>
 	// inode_change_ok().)
@@ -1899,9 +1913,9 @@ func Renameat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 }
 
 // Fallocate implements linux system call fallocate(2).
-// (well, not really, but at least we return the expected error codes)
 func Fallocate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := kdefs.FD(args[0].Int())
+	mode := args[1].Int64()
 	offset := args[2].Int64()
 	length := args[3].Int64()
 
@@ -1914,8 +1928,42 @@ func Fallocate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	if offset < 0 || length <= 0 {
 		return 0, nil, syserror.EINVAL
 	}
+	if mode != 0 {
+		t.Kernel().EmitUnimplementedEvent(t)
+		return 0, nil, syserror.ENOTSUP
+	}
+	if !file.Flags().Write {
+		return 0, nil, syserror.EBADF
+	}
+	if fs.IsPipe(file.Dirent.Inode.StableAttr) {
+		return 0, nil, syserror.ESPIPE
+	}
+	if fs.IsDir(file.Dirent.Inode.StableAttr) {
+		return 0, nil, syserror.EISDIR
+	}
+	if !fs.IsRegular(file.Dirent.Inode.StableAttr) {
+		return 0, nil, syserror.ENODEV
+	}
+	size := offset + length
+	if size < 0 {
+		return 0, nil, syserror.EFBIG
+	}
+	if uint64(size) >= t.ThreadGroup().Limits().Get(limits.FileSize).Cur {
+		t.SendSignal(&arch.SignalInfo{
+			Signo: int32(syscall.SIGXFSZ),
+			Code:  arch.SignalInfoUser,
+		})
+		return 0, nil, syserror.EFBIG
+	}
 
-	return 0, nil, syserror.EOPNOTSUPP
+	if err := file.Dirent.Inode.Allocate(t, file.Dirent, offset, length); err != nil {
+		return 0, nil, err
+	}
+
+	// File length modified, generate notification.
+	file.Dirent.InotifyEvent(linux.IN_MODIFY, 0)
+
+	return 0, nil, nil
 }
 
 // Flock implements linux syscall flock(2).
@@ -1988,99 +2036,6 @@ func Flock(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	}
 
 	return 0, nil, nil
-}
-
-// Sendfile implements linux system call sendfile(2).
-func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	outFD := kdefs.FD(args[0].Int())
-	inFD := kdefs.FD(args[1].Int())
-	offsetAddr := args[2].Pointer()
-	count := int64(args[3].SizeT())
-
-	// Don't send a negative number of bytes.
-	if count < 0 {
-		return 0, nil, syserror.EINVAL
-	}
-
-	// Get files.
-	outFile := t.FDMap().GetFile(outFD)
-	if outFile == nil {
-		return 0, nil, syserror.EBADF
-	}
-	defer outFile.DecRef()
-
-	inFile := t.FDMap().GetFile(inFD)
-	if inFile == nil {
-		return 0, nil, syserror.EBADF
-	}
-	defer inFile.DecRef()
-
-	// Verify that the outfile is writable.
-	outFlags := outFile.Flags()
-	if !outFlags.Write {
-		return 0, nil, syserror.EBADF
-	}
-
-	// Verify that the outfile Append flag is not set.
-	if outFlags.Append {
-		return 0, nil, syserror.EINVAL
-	}
-
-	// Verify that we have a regular infile.
-	// http://elixir.free-electrons.com/linux/latest/source/fs/splice.c#L933
-	if !fs.IsRegular(inFile.Dirent.Inode.StableAttr) {
-		return 0, nil, syserror.EINVAL
-	}
-
-	// Verify that the infile is readable.
-	if !inFile.Flags().Read {
-		return 0, nil, syserror.EBADF
-	}
-
-	// Setup for sending data.
-	var n int64
-	var err error
-	w := &fs.FileWriter{t, outFile}
-	hasOffset := offsetAddr != 0
-	// If we have a provided offset.
-	if hasOffset {
-		// Verify that when offset address is not null, infile must be seekable
-		if !inFile.Flags().Pread {
-			return 0, nil, syserror.ESPIPE
-		}
-		// Copy in the offset.
-		var offset int64
-		if _, err := t.CopyIn(offsetAddr, &offset); err != nil {
-			return 0, nil, err
-		}
-		if offset < 0 {
-			return 0, nil, syserror.EINVAL
-		}
-		// Send data using Preadv.
-		r := io.NewSectionReader(&fs.FileReader{t, inFile}, offset, count)
-		n, err = io.Copy(w, r)
-		// Copy out the new offset.
-		if _, err := t.CopyOut(offsetAddr, n+offset); err != nil {
-			return 0, nil, err
-		}
-		// If we don't have a provided offset.
-	} else {
-		// Send data using readv.
-		inOff := inFile.Offset()
-		r := &io.LimitedReader{R: &fs.FileReader{t, inFile}, N: count}
-		n, err = io.Copy(w, r)
-		inOff += n
-		if inFile.Offset() != inOff {
-			// Adjust file position in case more bytes were read than written.
-			if _, err := inFile.Seek(t, fs.SeekSet, inOff); err != nil {
-				return 0, nil, syserror.EIO
-			}
-		}
-	}
-
-	// We can only pass a single file to handleIOError, so pick inFile
-	// arbitrarily.
-	return uintptr(n), nil, handleIOError(t, n != 0, err, kernel.ERESTARTSYS, "sendfile", inFile)
 }
 
 const (

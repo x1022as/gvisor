@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -21,31 +22,34 @@
 #include <unistd.h>
 
 #include <functional>
+#include <tuple>
 #include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "test/util/cleanup.h"
+#include "test/util/file_descriptor.h"
 #include "test/util/logging.h"
 #include "test/util/multiprocess_util.h"
 #include "test/util/posix_error.h"
 #include "test/util/signal_util.h"
 #include "test/util/test_util.h"
+#include "test/util/thread_util.h"
+#include "test/util/time_util.h"
 
 using ::testing::UnorderedElementsAre;
 
 // These unit tests focus on the wait4(2) system call, but include a basic
 // checks for the i386 waitpid(2) syscall, which is a subset of wait4(2).
 //
-// NOTE: Some functionality is not tested as
+// NOTE(b/22640830,b/27680907,b/29049891): Some functionality is not tested as
 // it is not currently supported by gVisor:
-// * UID in waitid(2) siginfo.
 // * Process groups.
 // * Core dump status (WCOREDUMP).
-// * Linux only option __WNOTHREAD.
 //
 // Tests for waiting on stopped/continued children are in sigstop.cc.
 
@@ -232,18 +236,14 @@ TEST_P(WaitAnyChildTest, ForkAndClone) {
 
 // Return immediately if no child has exited.
 TEST_P(WaitAnyChildTest, WaitWNOHANG) {
-  EXPECT_THAT(
-      WaitAnyWithOptions(0, WNOHANG),
-      PosixErrorIs(ECHILD, ::testing::AnyOf(::testing::StrEq("waitid"),
-                                            ::testing::StrEq("wait4"))));
+  EXPECT_THAT(WaitAnyWithOptions(0, WNOHANG),
+              PosixErrorIs(ECHILD, ::testing::_));
 }
 
 // Bad options passed
 TEST_P(WaitAnyChildTest, BadOption) {
-  EXPECT_THAT(
-      WaitAnyWithOptions(0, 123456),
-      PosixErrorIs(EINVAL, ::testing::AnyOf(::testing::StrEq("waitid"),
-                                            ::testing::StrEq("wait4"))));
+  EXPECT_THAT(WaitAnyWithOptions(0, 123456),
+              PosixErrorIs(EINVAL, ::testing::_));
 }
 
 TEST_P(WaitAnyChildTest, WaitedChildRusage) {
@@ -294,9 +294,7 @@ TEST_P(WaitAnyChildTest, IgnoredChildRusage) {
   pid_t child;
   ASSERT_THAT(child = ForkSpinAndExit(0, absl::ToInt64Seconds(kSpin)),
               SyscallSucceeds());
-  ASSERT_THAT(WaitAny(0), PosixErrorIs(ECHILD, ::testing::AnyOf(
-                                                   ::testing::StrEq("waitid"),
-                                                   ::testing::StrEq("wait4"))));
+  ASSERT_THAT(WaitAny(0), PosixErrorIs(ECHILD, ::testing::_));
   const absl::Duration end =
       absl::Nanoseconds(clock_gettime_nsecs(CLOCK_MONOTONIC));
   EXPECT_GE(end - start, kSpin - kSpinGrace);
@@ -309,7 +307,7 @@ TEST_P(WaitAnyChildTest, IgnoredChildRusage) {
   EXPECT_EQ(before.ru_stime.tv_usec, after.ru_stime.tv_usec);
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     Waiters, WaitAnyChildTest,
     ::testing::Values(
         [](int code, int options) -> PosixErrorOr<pid_t> {
@@ -357,13 +355,22 @@ INSTANTIATE_TEST_CASE_P(
           return static_cast<pid_t>(si.si_pid);
         }));
 
-// Fixture for tests parameterized by a function that takes the PID of a
-// specific child to wait for, waits for it to exit, and checks that it exits
-// with the given code.
+// Fixture for tests parameterized by a (sysno, function) tuple. The function
+// takes the PID of a specific child to wait for, waits for it to exit, and
+// checks that it exits with the given code.
 class WaitSpecificChildTest
-    : public ::testing::TestWithParam<std::function<PosixError(pid_t, int)>> {
+    : public ::testing::TestWithParam<
+          std::tuple<int, std::function<PosixError(pid_t, int, int)>>> {
  protected:
-  PosixError WaitFor(pid_t pid, int code) { return GetParam()(pid, code); }
+  int Sysno() { return std::get<0>(GetParam()); }
+
+  PosixError WaitForWithOptions(pid_t pid, int options, int code) {
+    return std::get<1>(GetParam())(pid, options, code);
+  }
+
+  PosixError WaitFor(pid_t pid, int code) {
+    return std::get<1>(GetParam())(pid, 0, code);
+  }
 };
 
 // Wait for specific child to exit.
@@ -432,6 +439,73 @@ TEST_P(WaitSpecificChildTest, AfterExit) {
   EXPECT_NO_ERRNO(WaitFor(child, 0));
 }
 
+// Wait for child of sibling thread.
+TEST_P(WaitSpecificChildTest, SiblingChildren) {
+  absl::Mutex mu;
+  pid_t child;
+  bool ready = false;
+  bool stop = false;
+
+  ScopedThread t([&] {
+    absl::MutexLock ml(&mu);
+    EXPECT_THAT(child = ForkAndExit(0, 0), SyscallSucceeds());
+    ready = true;
+    mu.Await(absl::Condition(&stop));
+  });
+
+  // N.B. This must be declared after ScopedThread, so it is destructed first,
+  // thus waking the thread.
+  absl::MutexLock ml(&mu);
+  mu.Await(absl::Condition(&ready));
+
+  EXPECT_NO_ERRNO(WaitFor(child, 0));
+
+  // Keep the sibling alive until after we've waited so the child isn't
+  // reparented.
+  stop = true;
+}
+
+// Waiting for child of sibling thread not allowed with WNOTHREAD.
+TEST_P(WaitSpecificChildTest, SiblingChildrenWNOTHREAD) {
+  // Linux added WNOTHREAD support to waitid(2) in
+  // 91c4e8ea8f05916df0c8a6f383508ac7c9e10dba ("wait: allow sys_waitid() to
+  // accept __WNOTHREAD/__WCLONE/__WALL"). i.e., Linux 4.7.
+  //
+  // Skip the test if it isn't supported yet.
+  if (Sysno() == SYS_waitid) {
+    int ret = waitid(P_ALL, 0, nullptr, WEXITED | WNOHANG | __WNOTHREAD);
+    SKIP_IF(ret < 0 && errno == EINVAL);
+  }
+
+  absl::Mutex mu;
+  pid_t child;
+  bool ready = false;
+  bool stop = false;
+
+  ScopedThread t([&] {
+    absl::MutexLock ml(&mu);
+    EXPECT_THAT(child = ForkAndExit(0, 0), SyscallSucceeds());
+    ready = true;
+    mu.Await(absl::Condition(&stop));
+
+    // This thread can wait on child.
+    EXPECT_NO_ERRNO(WaitForWithOptions(child, __WNOTHREAD, 0));
+  });
+
+  // N.B. This must be declared after ScopedThread, so it is destructed first,
+  // thus waking the thread.
+  absl::MutexLock ml(&mu);
+  mu.Await(absl::Condition(&ready));
+
+  // This thread can't wait on child.
+  EXPECT_THAT(WaitForWithOptions(child, __WNOTHREAD, 0),
+              PosixErrorIs(ECHILD, ::testing::_));
+
+  // Keep the sibling alive until after we've waited so the child isn't
+  // reparented.
+  stop = true;
+}
+
 // Wait for specific child to exit.
 // A non-CLONE_THREAD child which sends SIGCHLD upon exit behaves much like
 // a forked process.
@@ -459,10 +533,7 @@ TEST_P(WaitSpecificChildTest, CloneNoSIGCHLD) {
   int child;
   ASSERT_THAT(child = CloneAndExit(0, stack, 0), SyscallSucceeds());
 
-  EXPECT_THAT(
-      WaitFor(child, 0),
-      PosixErrorIs(ECHILD, ::testing::AnyOf(::testing::StrEq("waitid"),
-                                            ::testing::StrEq("wait4"))));
+  EXPECT_THAT(WaitFor(child, 0), PosixErrorIs(ECHILD, ::testing::_));
 }
 
 // Waiting after the child has already exited returns immediately.
@@ -492,10 +563,7 @@ TEST_P(WaitSpecificChildTest, CloneThread) {
   ASSERT_THAT(child = CloneAndExit(15, stack, CLONE_THREAD), SyscallSucceeds());
   auto start = absl::Now();
 
-  EXPECT_THAT(
-      WaitFor(child, 0),
-      PosixErrorIs(ECHILD, ::testing::AnyOf(::testing::StrEq("waitid"),
-                                            ::testing::StrEq("wait4"))));
+  EXPECT_THAT(WaitFor(child, 0), PosixErrorIs(ECHILD, ::testing::_));
 
   // Ensure wait4 didn't block.
   EXPECT_LE(absl::Now() - start, absl::Seconds(10));
@@ -505,12 +573,81 @@ TEST_P(WaitSpecificChildTest, CloneThread) {
   absl::SleepFor(absl::Seconds(5));
 }
 
+// A child that does not send a SIGCHLD on exit may be waited on with
+// the __WCLONE flag.
+TEST_P(WaitSpecificChildTest, CloneWCLONE) {
+  // Linux added WCLONE support to waitid(2) in
+  // 91c4e8ea8f05916df0c8a6f383508ac7c9e10dba ("wait: allow sys_waitid() to
+  // accept __WNOTHREAD/__WCLONE/__WALL"). i.e., Linux 4.7.
+  //
+  // Skip the test if it isn't supported yet.
+  if (Sysno() == SYS_waitid) {
+    int ret = waitid(P_ALL, 0, nullptr, WEXITED | WNOHANG | __WCLONE);
+    SKIP_IF(ret < 0 && errno == EINVAL);
+  }
+
+  uintptr_t stack;
+  ASSERT_THAT(stack = AllocStack(), SyscallSucceeds());
+  auto free =
+      Cleanup([stack] { ASSERT_THAT(FreeStack(stack), SyscallSucceeds()); });
+
+  int child;
+  ASSERT_THAT(child = CloneAndExit(0, stack, 0), SyscallSucceeds());
+
+  EXPECT_NO_ERRNO(WaitForWithOptions(child, __WCLONE, 0));
+}
+
+// A forked child cannot be waited on with WCLONE.
+TEST_P(WaitSpecificChildTest, ForkWCLONE) {
+  // Linux added WCLONE support to waitid(2) in
+  // 91c4e8ea8f05916df0c8a6f383508ac7c9e10dba ("wait: allow sys_waitid() to
+  // accept __WNOTHREAD/__WCLONE/__WALL"). i.e., Linux 4.7.
+  //
+  // Skip the test if it isn't supported yet.
+  if (Sysno() == SYS_waitid) {
+    int ret = waitid(P_ALL, 0, nullptr, WEXITED | WNOHANG | __WCLONE);
+    SKIP_IF(ret < 0 && errno == EINVAL);
+  }
+
+  pid_t child;
+  ASSERT_THAT(child = ForkAndExit(0, 0), SyscallSucceeds());
+
+  EXPECT_THAT(WaitForWithOptions(child, WNOHANG | __WCLONE, 0),
+              PosixErrorIs(ECHILD, ::testing::_));
+
+  EXPECT_NO_ERRNO(WaitFor(child, 0));
+}
+
+// Any type of child can be waited on with WALL.
+TEST_P(WaitSpecificChildTest, WALL) {
+  // Linux added WALL support to waitid(2) in
+  // 91c4e8ea8f05916df0c8a6f383508ac7c9e10dba ("wait: allow sys_waitid() to
+  // accept __WNOTHREAD/__WCLONE/__WALL"). i.e., Linux 4.7.
+  //
+  // Skip the test if it isn't supported yet.
+  if (Sysno() == SYS_waitid) {
+    int ret = waitid(P_ALL, 0, nullptr, WEXITED | WNOHANG | __WALL);
+    SKIP_IF(ret < 0 && errno == EINVAL);
+  }
+
+  pid_t child;
+  ASSERT_THAT(child = ForkAndExit(0, 0), SyscallSucceeds());
+
+  EXPECT_NO_ERRNO(WaitForWithOptions(child, __WALL, 0));
+
+  uintptr_t stack;
+  ASSERT_THAT(stack = AllocStack(), SyscallSucceeds());
+  auto free =
+      Cleanup([stack] { ASSERT_THAT(FreeStack(stack), SyscallSucceeds()); });
+
+  ASSERT_THAT(child = CloneAndExit(0, stack, 0), SyscallSucceeds());
+
+  EXPECT_NO_ERRNO(WaitForWithOptions(child, __WALL, 0));
+}
+
 // Return ECHILD for bad child.
 TEST_P(WaitSpecificChildTest, BadChild) {
-  EXPECT_THAT(
-      WaitFor(42, 0),
-      PosixErrorIs(ECHILD, ::testing::AnyOf(::testing::StrEq("waitid"),
-                                            ::testing::StrEq("wait4"))));
+  EXPECT_THAT(WaitFor(42, 0), PosixErrorIs(ECHILD, ::testing::_));
 }
 
 // Wait for a child process that only exits after calling execve(2) from a
@@ -551,55 +688,53 @@ TEST_P(WaitSpecificChildTest, AfterChildExecve) {
   EXPECT_NO_ERRNO(WaitFor(child, 0));
 }
 
-INSTANTIATE_TEST_CASE_P(
-    Waiters, WaitSpecificChildTest,
-    ::testing::Values(
-        [](pid_t pid, int code) -> PosixError {
-          int status;
-          auto const rv = Wait4(pid, &status, 0, nullptr);
-          MaybeSave();
-          if (rv < 0) {
-            return PosixError(errno, "wait4");
-          } else if (rv != pid) {
-            return PosixError(EINVAL, absl::StrCat("unexpected pid: got ", rv,
-                                                   ", wanted ", pid));
-          }
-          if (!WIFEXITED(status) || WEXITSTATUS(status) != code) {
-            return PosixError(
-                EINVAL, absl::StrCat("unexpected wait status: got ", status,
-                                     ", wanted ", code));
-          }
-          return NoError();
-        },
-        [](pid_t pid, int code) -> PosixError {
-          siginfo_t si;
-          auto const rv = Waitid(P_PID, pid, &si, WEXITED);
-          MaybeSave();
-          if (rv < 0) {
-            return PosixError(errno, "waitid");
-          }
-          if (si.si_pid != pid) {
-            return PosixError(EINVAL,
-                              absl::StrCat("unexpected pid: got ", si.si_pid,
+PosixError CheckWait4(pid_t pid, int options, int code) {
+  int status;
+  auto const rv = Wait4(pid, &status, options, nullptr);
+  MaybeSave();
+  if (rv < 0) {
+    return PosixError(errno, "wait4");
+  } else if (rv != pid) {
+    return PosixError(
+        EINVAL, absl::StrCat("unexpected pid: got ", rv, ", wanted ", pid));
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != code) {
+    return PosixError(EINVAL, absl::StrCat("unexpected wait status: got ",
+                                           status, ", wanted ", code));
+  }
+  return NoError();
+};
+
+PosixError CheckWaitid(pid_t pid, int options, int code) {
+  siginfo_t si;
+  auto const rv = Waitid(P_PID, pid, &si, options | WEXITED);
+  MaybeSave();
+  if (rv < 0) {
+    return PosixError(errno, "waitid");
+  }
+  if (si.si_pid != pid) {
+    return PosixError(EINVAL, absl::StrCat("unexpected pid: got ", si.si_pid,
                                            ", wanted ", pid));
-          }
-          if (si.si_signo != SIGCHLD) {
-            return PosixError(
-                EINVAL, absl::StrCat("unexpected signo: got ", si.si_signo,
-                                     ", wanted ", SIGCHLD));
-          }
-          if (si.si_status != code) {
-            return PosixError(
-                EINVAL, absl::StrCat("unexpected status: got ", si.si_status,
-                                     ", wanted ", code));
-          }
-          if (si.si_code != CLD_EXITED) {
-            return PosixError(EINVAL,
-                              absl::StrCat("unexpected code: got ", si.si_code,
+  }
+  if (si.si_signo != SIGCHLD) {
+    return PosixError(EINVAL, absl::StrCat("unexpected signo: got ",
+                                           si.si_signo, ", wanted ", SIGCHLD));
+  }
+  if (si.si_status != code) {
+    return PosixError(EINVAL, absl::StrCat("unexpected status: got ",
+                                           si.si_status, ", wanted ", code));
+  }
+  if (si.si_code != CLD_EXITED) {
+    return PosixError(EINVAL, absl::StrCat("unexpected code: got ", si.si_code,
                                            ", wanted ", CLD_EXITED));
-          }
-          return NoError();
-        }));
+  }
+  return NoError();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Waiters, WaitSpecificChildTest,
+    ::testing::Values(std::make_tuple(SYS_wait4, CheckWait4),
+                      std::make_tuple(SYS_waitid, CheckWaitid)));
 
 // WIFEXITED, WIFSIGNALED, WTERMSIG indicate signal exit.
 TEST(WaitTest, SignalExit) {
@@ -615,21 +750,6 @@ TEST(WaitTest, SignalExit) {
   EXPECT_FALSE(WIFEXITED(status));
   EXPECT_TRUE(WIFSIGNALED(status));
   EXPECT_EQ(SIGKILL, WTERMSIG(status));
-}
-
-// A child that does not send a SIGCHLD on exit may be waited on with
-// the __WCLONE flag.
-TEST(WaitTest, CloneWCLONE) {
-  uintptr_t stack;
-  ASSERT_THAT(stack = AllocStack(), SyscallSucceeds());
-  auto free =
-      Cleanup([stack] { ASSERT_THAT(FreeStack(stack), SyscallSucceeds()); });
-
-  int child;
-  ASSERT_THAT(child = CloneAndExit(0, stack, 0), SyscallSucceeds());
-
-  EXPECT_THAT(Wait4(child, nullptr, __WCLONE, nullptr),
-              SyscallSucceedsWithValue(child));
 }
 
 // waitid requires at least one option.
@@ -741,6 +861,50 @@ TEST(WaitTest, WaitidRusage) {
   EXPECT_EQ(si.si_pid, child);
 
   EXPECT_GE(RusageCpuTime(rusage), kSpin);
+}
+
+// After bf959931ddb88c4e4366e96dd22e68fa0db9527c ("wait/ptrace: assume __WALL
+// if the child is traced") (Linux 4.7), tracees are always eligible for
+// waiting, regardless of type.
+TEST(WaitTest, TraceeWALL) {
+  int fds[2];
+  ASSERT_THAT(pipe(fds), SyscallSucceeds());
+  FileDescriptor rfd(fds[0]);
+  FileDescriptor wfd(fds[1]);
+
+  pid_t child = fork();
+  if (child == 0) {
+    // Child.
+    rfd.reset();
+
+    TEST_PCHECK(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) == 0);
+
+    // Notify parent that we're now a tracee.
+    wfd.reset();
+
+    _exit(0);
+  }
+  ASSERT_THAT(child, SyscallSucceeds());
+
+  wfd.reset();
+
+  // Wait for child to become tracee.
+  char c;
+  EXPECT_THAT(ReadFd(rfd.get(), &c, sizeof(c)), SyscallSucceedsWithValue(0));
+
+  // We can wait on the fork child with WCLONE, as it is a tracee.
+  int status;
+  if (IsRunningOnGvisor()) {
+    ASSERT_THAT(Wait4(child, &status, __WCLONE, nullptr),
+                SyscallSucceedsWithValue(child));
+
+    EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << status;
+  } else {
+    // On older versions of Linux, we may get ECHILD.
+    ASSERT_THAT(Wait4(child, &status, __WCLONE, nullptr),
+                ::testing::AnyOf(SyscallSucceedsWithValue(child),
+                                 SyscallFailsWithErrno(ECHILD)));
+  }
 }
 
 }  // namespace

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -115,7 +115,6 @@ func createLoader() (*Loader, func(), error) {
 		Spec:         spec,
 		Conf:         conf,
 		ControllerFD: fd,
-		DeviceFD:     -1,
 		GoferFDs:     []int{sandEnd},
 		StdioFDs:     stdio,
 	}
@@ -398,14 +397,15 @@ func TestCreateMountNamespace(t *testing.T) {
 			}
 			defer cleanup()
 
-			// setupRootContainerFS needs to find root from the context after the
+			// setupRootContainer needs to find root from the context after the
 			// namespace is created.
 			var mns *fs.MountNamespace
 			setMountNS := func(m *fs.MountNamespace) {
 				mns = m
 				ctx.(*contexttest.TestContext).RegisterValue(fs.CtxRoot, mns.Root())
 			}
-			if err := setupRootContainerFS(ctx, ctx, &tc.spec, conf, []int{sandEnd}, setMountNS); err != nil {
+			mntr := newContainerMounter(&tc.spec, "", []int{sandEnd}, nil)
+			if err := mntr.setupRootContainer(ctx, ctx, conf, setMountNS); err != nil {
 				t.Fatalf("createMountNamespace test case %q failed: %v", tc.name, err)
 			}
 			root := mns.Root()
@@ -610,8 +610,8 @@ func TestRestoreEnvironment(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			conf := testConfig()
-			fds := &fdDispenser{fds: tc.ioFDs}
-			actualRenv, err := createRestoreEnvironment(tc.spec, conf, fds)
+			mntr := newContainerMounter(tc.spec, "", tc.ioFDs, nil)
+			actualRenv, err := mntr.createRestoreEnvironment(conf)
 			if !tc.errorExpected && err != nil {
 				t.Fatalf("could not create restore environment for test:%s", tc.name)
 			} else if tc.errorExpected {

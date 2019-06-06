@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,12 +25,12 @@ import (
 )
 
 func overlayHasWhiteout(parent *Inode, name string) bool {
-	buf, err := parent.Getxattr(XattrOverlayWhiteout(name))
-	return err == nil && string(buf) == "y"
+	s, err := parent.Getxattr(XattrOverlayWhiteout(name))
+	return err == nil && s == "y"
 }
 
 func overlayCreateWhiteout(parent *Inode, name string) error {
-	return parent.InodeOperations.Setxattr(parent, XattrOverlayWhiteout(name), []byte("y"))
+	return parent.InodeOperations.Setxattr(parent, XattrOverlayWhiteout(name), "y")
 }
 
 func overlayWriteOut(ctx context.Context, o *overlayEntry) error {
@@ -142,7 +142,7 @@ func overlayLookup(ctx context.Context, parent *overlayEntry, inode *Inode, name
 				} else {
 					// If we have something from the upper, we can only use it if the types
 					// match.
-					// NOTE: Allow SpecialDirectories and Directories to merge.
+					// NOTE(b/112312863): Allow SpecialDirectories and Directories to merge.
 					// This is needed to allow submounts in /proc and /sys.
 					if upperInode.StableAttr.Type == child.Inode.StableAttr.Type ||
 						(IsDir(upperInode.StableAttr) && IsDir(child.Inode.StableAttr)) {
@@ -226,7 +226,7 @@ func overlayCreate(ctx context.Context, o *overlayEntry, parent *Dirent, name st
 		return nil, err
 	}
 
-	// NOTE: Replace the Dirent with a transient Dirent, since
+	// NOTE(b/71766861): Replace the Dirent with a transient Dirent, since
 	// we are about to create the real Dirent: an overlay Dirent.
 	//
 	// This ensures the *fs.File returned from overlayCreate is in the same
@@ -338,7 +338,7 @@ func overlayRename(ctx context.Context, o *overlayEntry, oldParent *Dirent, rena
 		// directory will appear empty in the upper fs, which will then
 		// allow the rename to proceed when it should return ENOTEMPTY.
 		//
-		// NOTE: Ideally, we'd just pass in the replaced
+		// NOTE(b/111808347): Ideally, we'd just pass in the replaced
 		// Dirent from Rename, but we must drop the reference on
 		// replaced before we make the rename call, so Rename can't
 		// pass the Dirent to the Inode without significantly
@@ -389,7 +389,7 @@ func overlayRename(ctx context.Context, o *overlayEntry, oldParent *Dirent, rena
 		return err
 	}
 	oldName := renamed.name
-	if err := o.upper.InodeOperations.Rename(ctx, oldParent.Inode.overlay.upper, oldName, newParent.Inode.overlay.upper, newName, replacement); err != nil {
+	if err := o.upper.InodeOperations.Rename(ctx, renamed.Inode.overlay.upper, oldParent.Inode.overlay.upper, oldName, newParent.Inode.overlay.upper, newName, replacement); err != nil {
 		return err
 	}
 	if renamed.Inode.overlay.lowerExists {
@@ -433,12 +433,7 @@ func overlayBoundEndpoint(o *overlayEntry, path string) transport.BoundEndpoint 
 		return o.upper.InodeOperations.BoundEndpoint(o.upper, path)
 	}
 
-	// If the lower is itself an overlay, recurse.
-	if o.lower.overlay != nil {
-		return overlayBoundEndpoint(o.lower.overlay, path)
-	}
-	// Lower is not an overlay. Call BoundEndpoint directly.
-	return o.lower.InodeOperations.BoundEndpoint(o.lower, path)
+	return o.lower.BoundEndpoint(path)
 }
 
 func overlayGetFile(ctx context.Context, o *overlayEntry, d *Dirent, flags FileFlags) (*File, error) {
@@ -491,28 +486,28 @@ func overlayUnstableAttr(ctx context.Context, o *overlayEntry) (UnstableAttr, er
 	return attr, err
 }
 
-func overlayGetxattr(o *overlayEntry, name string) ([]byte, error) {
+func overlayGetxattr(o *overlayEntry, name string) (string, error) {
 	// Hot path. This is how the overlay checks for whiteout files.
 	// Avoid defers.
 	var (
-		b   []byte
+		s   string
 		err error
 	)
 
 	// Don't forward the value of the extended attribute if it would
 	// unexpectedly change the behavior of a wrapping overlay layer.
 	if strings.HasPrefix(XattrOverlayPrefix, name) {
-		return nil, syserror.ENODATA
+		return "", syserror.ENODATA
 	}
 
 	o.copyMu.RLock()
 	if o.upper != nil {
-		b, err = o.upper.Getxattr(name)
+		s, err = o.upper.Getxattr(name)
 	} else {
-		b, err = o.lower.Getxattr(name)
+		s, err = o.lower.Getxattr(name)
 	}
 	o.copyMu.RUnlock()
-	return b, err
+	return s, err
 }
 
 func overlayListxattr(o *overlayEntry) (map[string]struct{}, error) {
@@ -580,6 +575,13 @@ func overlayTruncate(ctx context.Context, o *overlayEntry, d *Dirent, size int64
 		return err
 	}
 	return o.upper.InodeOperations.Truncate(ctx, o.upper, size)
+}
+
+func overlayAllocate(ctx context.Context, o *overlayEntry, d *Dirent, offset, length int64) error {
+	if err := copyUp(ctx, d); err != nil {
+		return err
+	}
+	return o.upper.InodeOperations.Allocate(ctx, o.upper, offset, length)
 }
 
 func overlayReadlink(ctx context.Context, o *overlayEntry) (string, error) {

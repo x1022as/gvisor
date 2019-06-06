@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,9 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/un.h>
+
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -30,6 +32,9 @@
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
 
+// This file contains tests specific to Unix domain sockets. It does not contain
+// tests for UDS control messages. Those belong in socket_unix_cmsg.cc.
+//
 // This file is a generic socket test file. It must be built with another file
 // that provides the test types.
 
@@ -37,1012 +42,6 @@ namespace gvisor {
 namespace testing {
 
 namespace {
-
-TEST_P(UnixSocketPairTest, BasicFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  int fd = -1;
-  ASSERT_NO_FATAL_FAILURE(RecvSingleFD(sockets->second_fd(), &fd, received_data,
-                                       sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(fd, pair->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, BasicTwoFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair1 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-  auto pair2 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-  int sent_fds[] = {pair1->second_fd(), pair2->second_fd()};
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendFDs(sockets->first_fd(), sent_fds, 2, sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  int received_fds[] = {-1, -1};
-
-  ASSERT_NO_FATAL_FAILURE(RecvFDs(sockets->second_fd(), received_fds, 2,
-                                  received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(received_fds[0], pair1->first_fd()));
-  ASSERT_NO_FATAL_FAILURE(TransferTest(received_fds[1], pair2->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, BasicThreeFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair1 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-  auto pair2 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-  auto pair3 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-  int sent_fds[] = {pair1->second_fd(), pair2->second_fd(), pair3->second_fd()};
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendFDs(sockets->first_fd(), sent_fds, 3, sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  int received_fds[] = {-1, -1, -1};
-
-  ASSERT_NO_FATAL_FAILURE(RecvFDs(sockets->second_fd(), received_fds, 3,
-                                  received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(received_fds[0], pair1->first_fd()));
-  ASSERT_NO_FATAL_FAILURE(TransferTest(received_fds[1], pair2->first_fd()));
-  ASSERT_NO_FATAL_FAILURE(TransferTest(received_fds[2], pair3->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, BadFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  int sent_fd = -1;
-
-  struct msghdr msg = {};
-  char control[CMSG_SPACE(sizeof(sent_fd))];
-  msg.msg_control = control;
-  msg.msg_controllen = sizeof(control);
-
-  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-  cmsg->cmsg_len = CMSG_LEN(sizeof(sent_fd));
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type = SCM_RIGHTS;
-  memcpy(CMSG_DATA(cmsg), &sent_fd, sizeof(sent_fd));
-
-  struct iovec iov;
-  iov.iov_base = sent_data;
-  iov.iov_len = sizeof(sent_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  ASSERT_THAT(RetryEINTR(sendmsg)(sockets->first_fd(), &msg, 0),
-              SyscallFailsWithErrno(EBADF));
-}
-
-// BasicFDPassNoSpace starts off by sending a single FD just like BasicFDPass.
-// The difference is that when calling recvmsg, no space for FDs is provided,
-// only space for the cmsg header.
-TEST_P(UnixSocketPairTest, BasicFDPassNoSpace) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-
-  struct msghdr msg = {};
-  std::vector<char> control(CMSG_SPACE(0));
-  msg.msg_control = &control[0];
-  msg.msg_controllen = control.size();
-
-  struct iovec iov;
-  iov.iov_base = received_data;
-  iov.iov_len = sizeof(received_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  ASSERT_THAT(RetryEINTR(recvmsg)(sockets->second_fd(), &msg, 0),
-              SyscallSucceedsWithValue(sizeof(received_data)));
-
-  EXPECT_EQ(msg.msg_controllen, 0);
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-// BasicFDPassUnalignedRecv starts off by sending a single FD just like
-// BasicFDPass. The difference is that when calling recvmsg, the length of the
-// receive data is only aligned on a 4 byte boundry instead of the normal 8.
-TEST_P(UnixSocketPairTest, BasicFDPassUnalignedRecv) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  int fd = -1;
-  ASSERT_NO_FATAL_FAILURE(RecvSingleFDUnaligned(
-      sockets->second_fd(), &fd, received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(fd, pair->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, ConcurrentBasicFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  int sockfd1 = sockets->first_fd();
-  auto recv_func = [sockfd1, sent_data]() {
-    char received_data[20];
-    int fd = -1;
-    RecvSingleFD(sockfd1, &fd, received_data, sizeof(received_data));
-    ASSERT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-    char buf[20];
-    ASSERT_THAT(ReadFd(fd, buf, sizeof(buf)),
-                SyscallSucceedsWithValue(sizeof(buf)));
-    ASSERT_THAT(WriteFd(fd, buf, sizeof(buf)),
-                SyscallSucceedsWithValue(sizeof(buf)));
-  };
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->second_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  ScopedThread t(recv_func);
-
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-  ASSERT_THAT(WriteFd(pair->first_fd(), sent_data, sizeof(sent_data)),
-              SyscallSucceedsWithValue(sizeof(sent_data)));
-
-  char received_data[20];
-  ASSERT_THAT(ReadFd(pair->first_fd(), received_data, sizeof(received_data)),
-              SyscallSucceedsWithValue(sizeof(received_data)));
-
-  t.Join();
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-// FDPassNoRecv checks that the control message can be safely ignored by using
-// read(2) instead of recvmsg(2).
-TEST_P(UnixSocketPairTest, FDPassNoRecv) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  // Read while ignoring the passed FD.
-  char received_data[20];
-  ASSERT_THAT(
-      ReadFd(sockets->second_fd(), received_data, sizeof(received_data)),
-      SyscallSucceedsWithValue(sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  // Check that the socket still works for reads and writes.
-  ASSERT_NO_FATAL_FAILURE(
-      TransferTest(sockets->first_fd(), sockets->second_fd()));
-}
-
-// FDPassInterspersed1 checks that sent control messages cannot be read before
-// their associated data has been read.
-TEST_P(UnixSocketPairTest, FDPassInterspersed1) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char written_data[20];
-  RandomizeBuffer(written_data, sizeof(written_data));
-
-  ASSERT_THAT(WriteFd(sockets->first_fd(), written_data, sizeof(written_data)),
-              SyscallSucceedsWithValue(sizeof(written_data)));
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  // Check that we don't get a control message, but do get the data.
-  char received_data[20];
-  RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data));
-  EXPECT_EQ(0, memcmp(written_data, received_data, sizeof(written_data)));
-}
-
-// FDPassInterspersed2 checks that sent control messages cannot be read after
-// their assocated data has been read while ignoring the control message by
-// using read(2) instead of recvmsg(2).
-TEST_P(UnixSocketPairTest, FDPassInterspersed2) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char written_data[20];
-  RandomizeBuffer(written_data, sizeof(written_data));
-  ASSERT_THAT(WriteFd(sockets->first_fd(), written_data, sizeof(written_data)),
-              SyscallSucceedsWithValue(sizeof(written_data)));
-
-  char received_data[20];
-  ASSERT_THAT(
-      ReadFd(sockets->second_fd(), received_data, sizeof(received_data)),
-      SyscallSucceedsWithValue(sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  ASSERT_NO_FATAL_FAILURE(
-      RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data)));
-  EXPECT_EQ(0, memcmp(written_data, received_data, sizeof(written_data)));
-}
-
-TEST_P(UnixSocketPairTest, FDPassNotCoalesced) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data1[20];
-  RandomizeBuffer(sent_data1, sizeof(sent_data1));
-
-  auto pair1 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair1->second_fd(),
-                                       sent_data1, sizeof(sent_data1)));
-
-  char sent_data2[20];
-  RandomizeBuffer(sent_data2, sizeof(sent_data2));
-
-  auto pair2 =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair2->second_fd(),
-                                       sent_data2, sizeof(sent_data2)));
-
-  char received_data1[sizeof(sent_data1) + sizeof(sent_data2)];
-  int received_fd1 = -1;
-
-  RecvSingleFD(sockets->second_fd(), &received_fd1, received_data1,
-               sizeof(received_data1), sizeof(sent_data1));
-
-  EXPECT_EQ(0, memcmp(sent_data1, received_data1, sizeof(sent_data1)));
-  TransferTest(pair1->first_fd(), pair1->second_fd());
-
-  char received_data2[sizeof(sent_data1) + sizeof(sent_data2)];
-  int received_fd2 = -1;
-
-  RecvSingleFD(sockets->second_fd(), &received_fd2, received_data2,
-               sizeof(received_data2), sizeof(sent_data2));
-
-  EXPECT_EQ(0, memcmp(sent_data2, received_data2, sizeof(sent_data2)));
-  TransferTest(pair2->first_fd(), pair2->second_fd());
-}
-
-TEST_P(UnixSocketPairTest, FDPassPeek) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char peek_data[20];
-  int peek_fd = -1;
-  PeekSingleFD(sockets->second_fd(), &peek_fd, peek_data, sizeof(peek_data));
-  EXPECT_EQ(0, memcmp(sent_data, peek_data, sizeof(sent_data)));
-  TransferTest(peek_fd, pair->first_fd());
-  EXPECT_THAT(close(peek_fd), SyscallSucceeds());
-
-  char received_data[20];
-  int received_fd = -1;
-  RecvSingleFD(sockets->second_fd(), &received_fd, received_data,
-               sizeof(received_data));
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-  TransferTest(received_fd, pair->first_fd());
-  EXPECT_THAT(close(received_fd), SyscallSucceeds());
-}
-
-TEST_P(UnixSocketPairTest, BasicCredPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  struct ucred sent_creds;
-
-  ASSERT_THAT(sent_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(sent_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(sent_creds.gid = getgid(), SyscallSucceeds());
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendCreds(sockets->first_fd(), sent_creds, sent_data, sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-  EXPECT_EQ(sent_creds.pid, received_creds.pid);
-  EXPECT_EQ(sent_creds.uid, received_creds.uid);
-  EXPECT_EQ(sent_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, SendNullCredsBeforeSoPassCredRecvEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendNullCmsg(sockets->first_fd(), sent_data, sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds {
-    0, 65534, 65534
-  };
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, SendNullCredsAfterSoPassCredRecvEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  SetSoPassCred(sockets->second_fd());
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendNullCmsg(sockets->first_fd(), sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds;
-  ASSERT_THAT(want_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.gid = getgid(), SyscallSucceeds());
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, SendNullCredsBeforeSoPassCredSendEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendNullCmsg(sockets->first_fd(), sent_data, sizeof(sent_data)));
-
-  SetSoPassCred(sockets->first_fd());
-
-  char received_data[20];
-  ASSERT_NO_FATAL_FAILURE(
-      RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-TEST_P(UnixSocketPairTest, SendNullCredsAfterSoPassCredSendEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  SetSoPassCred(sockets->first_fd());
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendNullCmsg(sockets->first_fd(), sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  ASSERT_NO_FATAL_FAILURE(
-      RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-TEST_P(UnixSocketPairTest, SendNullCredsBeforeSoPassCredRecvEndAfterSendEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  SetSoPassCred(sockets->first_fd());
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendNullCmsg(sockets->first_fd(), sent_data, sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds;
-  ASSERT_THAT(want_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.gid = getgid(), SyscallSucceeds());
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, WriteBeforeSoPassCredRecvEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  ASSERT_THAT(WriteFd(sockets->first_fd(), sent_data, sizeof(sent_data)),
-              SyscallSucceedsWithValue(sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds {
-    0, 65534, 65534
-  };
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, WriteAfterSoPassCredRecvEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  SetSoPassCred(sockets->second_fd());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-  ASSERT_THAT(WriteFd(sockets->first_fd(), sent_data, sizeof(sent_data)),
-              SyscallSucceedsWithValue(sizeof(sent_data)));
-
-  char received_data[20];
-
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds;
-  ASSERT_THAT(want_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.gid = getgid(), SyscallSucceeds());
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, WriteBeforeSoPassCredSendEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  ASSERT_THAT(WriteFd(sockets->first_fd(), sent_data, sizeof(sent_data)),
-              SyscallSucceedsWithValue(sizeof(sent_data)));
-
-  SetSoPassCred(sockets->first_fd());
-
-  char received_data[20];
-  ASSERT_NO_FATAL_FAILURE(
-      RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-TEST_P(UnixSocketPairTest, WriteAfterSoPassCredSendEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  SetSoPassCred(sockets->first_fd());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  ASSERT_THAT(WriteFd(sockets->first_fd(), sent_data, sizeof(sent_data)),
-              SyscallSucceedsWithValue(sizeof(sent_data)));
-
-  char received_data[20];
-  ASSERT_NO_FATAL_FAILURE(
-      RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-TEST_P(UnixSocketPairTest, WriteBeforeSoPassCredRecvEndAfterSendEnd) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  SetSoPassCred(sockets->first_fd());
-
-  ASSERT_THAT(WriteFd(sockets->first_fd(), sent_data, sizeof(sent_data)),
-              SyscallSucceedsWithValue(sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-
-  struct ucred received_creds;
-  ASSERT_NO_FATAL_FAILURE(RecvCreds(sockets->second_fd(), &received_creds,
-                                    received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds;
-  ASSERT_THAT(want_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.gid = getgid(), SyscallSucceeds());
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-}
-
-TEST_P(UnixSocketPairTest, SoPassCred) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  int opt;
-  socklen_t optLen = sizeof(opt);
-  EXPECT_THAT(
-      getsockopt(sockets->first_fd(), SOL_SOCKET, SO_PASSCRED, &opt, &optLen),
-      SyscallSucceeds());
-  EXPECT_FALSE(opt);
-
-  optLen = sizeof(opt);
-  EXPECT_THAT(
-      getsockopt(sockets->second_fd(), SOL_SOCKET, SO_PASSCRED, &opt, &optLen),
-      SyscallSucceeds());
-  EXPECT_FALSE(opt);
-
-  SetSoPassCred(sockets->first_fd());
-
-  optLen = sizeof(opt);
-  EXPECT_THAT(
-      getsockopt(sockets->first_fd(), SOL_SOCKET, SO_PASSCRED, &opt, &optLen),
-      SyscallSucceeds());
-  EXPECT_TRUE(opt);
-
-  optLen = sizeof(opt);
-  EXPECT_THAT(
-      getsockopt(sockets->second_fd(), SOL_SOCKET, SO_PASSCRED, &opt, &optLen),
-      SyscallSucceeds());
-  EXPECT_FALSE(opt);
-
-  int zero = 0;
-  EXPECT_THAT(setsockopt(sockets->first_fd(), SOL_SOCKET, SO_PASSCRED, &zero,
-                         sizeof(zero)),
-              SyscallSucceeds());
-
-  optLen = sizeof(opt);
-  EXPECT_THAT(
-      getsockopt(sockets->first_fd(), SOL_SOCKET, SO_PASSCRED, &opt, &optLen),
-      SyscallSucceeds());
-  EXPECT_FALSE(opt);
-
-  optLen = sizeof(opt);
-  EXPECT_THAT(
-      getsockopt(sockets->second_fd(), SOL_SOCKET, SO_PASSCRED, &opt, &optLen),
-      SyscallSucceeds());
-  EXPECT_FALSE(opt);
-}
-
-TEST_P(UnixSocketPairTest, NoDataCredPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  struct msghdr msg = {};
-
-  struct iovec iov;
-  iov.iov_base = sent_data;
-  iov.iov_len = sizeof(sent_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  char control[CMSG_SPACE(0)];
-  msg.msg_control = control;
-  msg.msg_controllen = sizeof(control);
-
-  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type = SCM_CREDENTIALS;
-  cmsg->cmsg_len = CMSG_LEN(0);
-
-  ASSERT_THAT(RetryEINTR(sendmsg)(sockets->first_fd(), &msg, 0),
-              SyscallFailsWithErrno(EINVAL));
-}
-
-TEST_P(UnixSocketPairTest, NoPassCred) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  struct ucred sent_creds;
-
-  ASSERT_THAT(sent_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(sent_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(sent_creds.gid = getgid(), SyscallSucceeds());
-
-  ASSERT_NO_FATAL_FAILURE(
-      SendCreds(sockets->first_fd(), sent_creds, sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-
-  ASSERT_NO_FATAL_FAILURE(
-      RecvNoCmsg(sockets->second_fd(), received_data, sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-}
-
-TEST_P(UnixSocketPairTest, CredAndFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  struct ucred sent_creds;
-
-  ASSERT_THAT(sent_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(sent_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(sent_creds.gid = getgid(), SyscallSucceeds());
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendCredsAndFD(sockets->first_fd(), sent_creds,
-                                         pair->second_fd(), sent_data,
-                                         sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-  struct ucred received_creds;
-  int fd = -1;
-  ASSERT_NO_FATAL_FAILURE(RecvCredsAndFD(sockets->second_fd(), &received_creds,
-                                         &fd, received_data,
-                                         sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  EXPECT_EQ(sent_creds.pid, received_creds.pid);
-  EXPECT_EQ(sent_creds.uid, received_creds.uid);
-  EXPECT_EQ(sent_creds.gid, received_creds.gid);
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(fd, pair->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, FDPassBeforeSoPassCred) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  SetSoPassCred(sockets->second_fd());
-
-  char received_data[20];
-  struct ucred received_creds;
-  int fd = -1;
-  ASSERT_NO_FATAL_FAILURE(RecvCredsAndFD(sockets->second_fd(), &received_creds,
-                                         &fd, received_data,
-                                         sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds {
-    0, 65534, 65534
-  };
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(fd, pair->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, FDPassAfterSoPassCred) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  SetSoPassCred(sockets->second_fd());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  struct ucred received_creds;
-  int fd = -1;
-  ASSERT_NO_FATAL_FAILURE(RecvCredsAndFD(sockets->second_fd(), &received_creds,
-                                         &fd, received_data,
-                                         sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  struct ucred want_creds;
-  ASSERT_THAT(want_creds.pid = getpid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.uid = getuid(), SyscallSucceeds());
-  ASSERT_THAT(want_creds.gid = getgid(), SyscallSucceeds());
-
-  EXPECT_EQ(want_creds.pid, received_creds.pid);
-  EXPECT_EQ(want_creds.uid, received_creds.uid);
-  EXPECT_EQ(want_creds.gid, received_creds.gid);
-
-  ASSERT_NO_FATAL_FAILURE(TransferTest(fd, pair->first_fd()));
-}
-
-TEST_P(UnixSocketPairTest, CloexecDroppedWhenFDPassed) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair = ASSERT_NO_ERRNO_AND_VALUE(
-      UnixDomainSocketPair(SOCK_SEQPACKET | SOCK_CLOEXEC).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  char received_data[20];
-  int fd = -1;
-  ASSERT_NO_FATAL_FAILURE(RecvSingleFD(sockets->second_fd(), &fd, received_data,
-                                       sizeof(received_data)));
-
-  EXPECT_THAT(fcntl(fd, F_GETFD), SyscallSucceedsWithValue(0));
-}
-
-TEST_P(UnixSocketPairTest, CloexecRecvFDPass) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  struct msghdr msg = {};
-  char control[CMSG_SPACE(sizeof(int))];
-  msg.msg_control = control;
-  msg.msg_controllen = sizeof(control);
-
-  struct iovec iov;
-  char received_data[20];
-  iov.iov_base = received_data;
-  iov.iov_len = sizeof(received_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  ASSERT_THAT(RetryEINTR(recvmsg)(sockets->second_fd(), &msg, MSG_CMSG_CLOEXEC),
-              SyscallSucceedsWithValue(sizeof(received_data)));
-  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-  ASSERT_NE(cmsg, nullptr);
-  ASSERT_EQ(cmsg->cmsg_len, CMSG_LEN(sizeof(int)));
-  ASSERT_EQ(cmsg->cmsg_level, SOL_SOCKET);
-  ASSERT_EQ(cmsg->cmsg_type, SCM_RIGHTS);
-
-  int fd = -1;
-  memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
-
-  EXPECT_THAT(fcntl(fd, F_GETFD), SyscallSucceedsWithValue(FD_CLOEXEC));
-}
-
-TEST_P(UnixSocketPairTest, FDPassAfterSoPassCredWithoutCredSpace) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  SetSoPassCred(sockets->second_fd());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  struct msghdr msg = {};
-  char control[CMSG_LEN(0)];
-  msg.msg_control = control;
-  msg.msg_controllen = sizeof(control);
-
-  char received_data[20];
-  struct iovec iov;
-  iov.iov_base = received_data;
-  iov.iov_len = sizeof(received_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  ASSERT_THAT(RetryEINTR(recvmsg)(sockets->second_fd(), &msg, 0),
-              SyscallSucceedsWithValue(sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-
-  EXPECT_EQ(msg.msg_controllen, sizeof(control));
-
-  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-  ASSERT_NE(cmsg, nullptr);
-  EXPECT_EQ(cmsg->cmsg_len, sizeof(control));
-  EXPECT_EQ(cmsg->cmsg_level, SOL_SOCKET);
-  EXPECT_EQ(cmsg->cmsg_type, SCM_CREDENTIALS);
-}
-
-// This test will validate that MSG_CTRUNC as an input flag to recvmsg will
-// not appear as an output flag on the control message when truncation doesn't
-// happen.
-TEST_P(UnixSocketPairTest, MsgCtruncInputIsNoop) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  struct msghdr msg = {};
-  char control[CMSG_SPACE(sizeof(int)) /* we're passing a single fd */];
-  msg.msg_control = control;
-  msg.msg_controllen = sizeof(control);
-
-  struct iovec iov;
-  char received_data[20];
-  iov.iov_base = received_data;
-  iov.iov_len = sizeof(received_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  ASSERT_THAT(RetryEINTR(recvmsg)(sockets->second_fd(), &msg, MSG_CTRUNC),
-              SyscallSucceedsWithValue(sizeof(received_data)));
-  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-  ASSERT_NE(cmsg, nullptr);
-  ASSERT_EQ(cmsg->cmsg_len, CMSG_LEN(sizeof(int)));
-  ASSERT_EQ(cmsg->cmsg_level, SOL_SOCKET);
-  ASSERT_EQ(cmsg->cmsg_type, SCM_RIGHTS);
-
-  // Now we should verify that MSG_CTRUNC wasn't set as an output flag.
-  EXPECT_EQ(msg.msg_flags & MSG_CTRUNC, 0);
-}
-
-TEST_P(UnixSocketPairTest, FDPassAfterSoPassCredWithoutCredHeaderSpace) {
-  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-
-  char sent_data[20];
-  RandomizeBuffer(sent_data, sizeof(sent_data));
-
-  auto pair =
-      ASSERT_NO_ERRNO_AND_VALUE(UnixDomainSocketPair(SOCK_SEQPACKET).Create());
-
-  SetSoPassCred(sockets->second_fd());
-
-  ASSERT_NO_FATAL_FAILURE(SendSingleFD(sockets->first_fd(), pair->second_fd(),
-                                       sent_data, sizeof(sent_data)));
-
-  struct msghdr msg = {};
-  char control[CMSG_LEN(0) / 2];
-  msg.msg_control = control;
-  msg.msg_controllen = sizeof(control);
-
-  char received_data[20];
-  struct iovec iov;
-  iov.iov_base = received_data;
-  iov.iov_len = sizeof(received_data);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  ASSERT_THAT(RetryEINTR(recvmsg)(sockets->second_fd(), &msg, 0),
-              SyscallSucceedsWithValue(sizeof(received_data)));
-
-  EXPECT_EQ(0, memcmp(sent_data, received_data, sizeof(sent_data)));
-  EXPECT_EQ(msg.msg_controllen, 0);
-}
 
 TEST_P(UnixSocketPairTest, InvalidGetSockOpt) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
@@ -1099,6 +98,14 @@ TEST_P(UnixSocketPairTest, RecvmmsgTimeoutAfterRecv) {
 TEST_P(UnixSocketPairTest, TIOCINQSucceeds) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 
+  if (IsRunningOnGvisor()) {
+    // TODO(gvisor.dev/issue/273): Inherited host UDS don't support TIOCINQ.
+    // Skip the test.
+    int size = -1;
+    int ret = ioctl(sockets->first_fd(), TIOCINQ, &size);
+    SKIP_IF(ret == -1 && errno == ENOTTY);
+  }
+
   int size = -1;
   EXPECT_THAT(ioctl(sockets->first_fd(), TIOCINQ, &size), SyscallSucceeds());
   EXPECT_EQ(size, 0);
@@ -1124,6 +131,14 @@ TEST_P(UnixSocketPairTest, TIOCINQSucceeds) {
 TEST_P(UnixSocketPairTest, TIOCOUTQSucceeds) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 
+  if (IsRunningOnGvisor()) {
+    // TODO(gvisor.dev/issue/273): Inherited host UDS don't support TIOCOUTQ.
+    // Skip the test.
+    int size = -1;
+    int ret = ioctl(sockets->second_fd(), TIOCOUTQ, &size);
+    SKIP_IF(ret == -1 && errno == ENOTTY);
+  }
+
   int size = -1;
   EXPECT_THAT(ioctl(sockets->second_fd(), TIOCOUTQ, &size), SyscallSucceeds());
   EXPECT_EQ(size, 0);
@@ -1147,37 +162,87 @@ TEST_P(UnixSocketPairTest, TIOCOUTQSucceeds) {
 }
 
 TEST_P(UnixSocketPairTest, NetdeviceIoctlsSucceed) {
-  FileDescriptor sock =
-      ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_UNIX, SOCK_DGRAM, 0));
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 
   // Prepare the request.
   struct ifreq ifr;
   snprintf(ifr.ifr_name, IFNAMSIZ, "lo");
 
   // Check that the ioctl either succeeds or fails with ENODEV.
-  int err = ioctl(sock.get(), SIOCGIFINDEX, &ifr);
+  int err = ioctl(sockets->first_fd(), SIOCGIFINDEX, &ifr);
   if (err < 0) {
     ASSERT_EQ(errno, ENODEV);
   }
 }
 
-TEST_P(UnixSocketPairTest, SocketShutdown) {
+TEST_P(UnixSocketPairTest, Shutdown) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
-  char buf[20];
+
   const std::string data = "abc";
-  ASSERT_THAT(WriteFd(sockets->first_fd(), data.c_str(), 3),
-              SyscallSucceedsWithValue(3));
+  ASSERT_THAT(WriteFd(sockets->first_fd(), data.c_str(), data.size()),
+              SyscallSucceedsWithValue(data.size()));
+
   ASSERT_THAT(shutdown(sockets->first_fd(), SHUT_RDWR), SyscallSucceeds());
   ASSERT_THAT(shutdown(sockets->second_fd(), SHUT_RDWR), SyscallSucceeds());
 
   // Shutting down a socket does not clear the buffer.
-  ASSERT_THAT(ReadFd(sockets->second_fd(), buf, 3),
-              SyscallSucceedsWithValue(3));
-  EXPECT_EQ(data, absl::string_view(buf, 3));
+  char buf[3];
+  ASSERT_THAT(ReadFd(sockets->second_fd(), buf, data.size()),
+              SyscallSucceedsWithValue(data.size()));
+  EXPECT_EQ(data, absl::string_view(buf, data.size()));
+}
+
+TEST_P(UnixSocketPairTest, ShutdownRead) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  ASSERT_THAT(shutdown(sockets->first_fd(), SHUT_RD), SyscallSucceeds());
+
+  // When the socket is shutdown for read, read behavior varies between
+  // different socket types. This is covered by the various ReadOneSideClosed
+  // test cases.
+
+  // ... and the peer cannot write.
+  const std::string data = "abc";
+  EXPECT_THAT(WriteFd(sockets->second_fd(), data.c_str(), data.size()),
+              SyscallFailsWithErrno(EPIPE));
+
+  // ... but the socket can still write.
+  ASSERT_THAT(WriteFd(sockets->first_fd(), data.c_str(), data.size()),
+              SyscallSucceedsWithValue(data.size()));
+
+  // ... and the peer can still read.
+  char buf[3];
+  EXPECT_THAT(ReadFd(sockets->second_fd(), buf, data.size()),
+              SyscallSucceedsWithValue(data.size()));
+  EXPECT_EQ(data, absl::string_view(buf, data.size()));
+}
+
+TEST_P(UnixSocketPairTest, ShutdownWrite) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  ASSERT_THAT(shutdown(sockets->first_fd(), SHUT_WR), SyscallSucceeds());
+
+  // When the socket is shutdown for write, it cannot write.
+  const std::string data = "abc";
+  EXPECT_THAT(WriteFd(sockets->first_fd(), data.c_str(), data.size()),
+              SyscallFailsWithErrno(EPIPE));
+
+  // ... and the peer read behavior varies between different socket types. This
+  // is covered by the various ReadOneSideClosed test cases.
+
+  // ... but the peer can still write.
+  char buf[3];
+  ASSERT_THAT(WriteFd(sockets->second_fd(), data.c_str(), data.size()),
+              SyscallSucceedsWithValue(data.size()));
+
+  // ... and the socket can still read.
+  EXPECT_THAT(ReadFd(sockets->first_fd(), buf, data.size()),
+              SyscallSucceedsWithValue(data.size()));
+  EXPECT_EQ(data, absl::string_view(buf, data.size()));
 }
 
 TEST_P(UnixSocketPairTest, SocketReopenFromProcfs) {
-  // TODO: We should be returning ENXIO and NOT EIO.
+  // TODO(b/122310852): We should be returning ENXIO and NOT EIO.
   SKIP_IF(IsRunningOnGvisor());
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 

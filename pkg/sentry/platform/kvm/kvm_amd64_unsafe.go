@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,7 +62,7 @@ func updateSystemValues(fd int) error {
 
 	// Calculate whether guestPCID is supported.
 	//
-	// FIXME: These should go through the much more pleasant
+	// FIXME(ascannell): These should go through the much more pleasant
 	// cpuid package interfaces, once a way to accept raw kvm CPUID entries
 	// is plumbed (or some rough equivalent).
 	for i := 0; i < int(cpuidSupported.nr); i++ {

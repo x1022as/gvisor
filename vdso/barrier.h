@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,11 +21,25 @@ namespace vdso {
 inline void barrier(void) { __asm__ __volatile__("" ::: "memory"); }
 
 #if __x86_64__
+
 inline void memory_barrier(void) {
   __asm__ __volatile__("mfence" ::: "memory");
 }
 inline void read_barrier(void) { barrier(); }
 inline void write_barrier(void) { barrier(); }
+
+#elif __aarch64__
+
+inline void memory_barrier(void) {
+  __asm__ __volatile__("dmb ish" ::: "memory");
+}
+inline void read_barrier(void) {
+  __asm__ __volatile__("dmb ishld" ::: "memory");
+}
+inline void write_barrier(void) {
+  __asm__ __volatile__("dmb ishst" ::: "memory");
+}
+
 #else
 #error "unsupported architecture"
 #endif

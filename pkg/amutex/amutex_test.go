@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,10 @@ func (s *sleeper) SleepStart() <-chan struct{} {
 }
 
 func (*sleeper) SleepFinish(bool) {
+}
+
+func (s *sleeper) Interrupted() bool {
+	return len(s.ch) != 0
 }
 
 func TestMutualExclusion(t *testing.T) {

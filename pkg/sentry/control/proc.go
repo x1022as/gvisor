@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -261,7 +261,7 @@ func (proc *Proc) Ps(args *PsArgs, out *string) error {
 }
 
 // Process contains information about a single process in a Sandbox.
-// TODO: Implement TTY field.
+// TODO(b/117881927): Implement TTY field.
 type Process struct {
 	UID auth.KUID       `json:"uid"`
 	PID kernel.ThreadID `json:"pid"`

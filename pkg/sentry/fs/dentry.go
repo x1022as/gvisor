@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -73,8 +73,8 @@ func (c *CollectEntriesSerializer) Written() int {
 	return len(c.Entries)
 }
 
-// DirCtx is used by node.Readdir to emit directory entries.  It is not
-// thread-safe.
+// DirCtx is used in FileOperations.IterateDir to emit directory entries. It is
+// not thread-safe.
 type DirCtx struct {
 	// Serializer is used to serialize the node attributes.
 	Serializer DentrySerializer
@@ -83,9 +83,6 @@ type DirCtx struct {
 	attrs map[string]DentAttr
 
 	// DirCursor is the directory cursor.
-	// TODO: Once Handles are removed this can just live in the
-	// respective FileOperations implementations and not need to get
-	// plumbed everywhere.
 	DirCursor *string
 }
 

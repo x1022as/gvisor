@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ func (t *Task) SetRSEQCriticalRegion(rscr RSEQCriticalRegion) error {
 	if rscr.CriticalSection.Contains(rscr.Restart) {
 		return syserror.EINVAL
 	}
-	// TODO: check that rscr.CriticalSection and rscr.Restart are in
+	// TODO(jamieliu): check that rscr.CriticalSection and rscr.Restart are in
 	// the application address range, for consistency with Linux
 	t.tg.rscr.Store(&rscr)
 	return nil

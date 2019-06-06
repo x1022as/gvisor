@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,9 +27,17 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
 
+// maxFilenameLen is the maximum length of a filename. This is dictated by 9P's
+// encoding of strings, which uses 2 bytes for the length prefix.
+const maxFilenameLen = (1 << 16) - 1
+
 // Lookup loads an Inode at name into a Dirent based on the session's cache
 // policy.
 func (i *inodeOperations) Lookup(ctx context.Context, dir *fs.Inode, name string) (*fs.Dirent, error) {
+	if len(name) > maxFilenameLen {
+		return nil, syserror.ENAMETOOLONG
+	}
+
 	cp := i.session().cachePolicy
 	if cp.cacheReaddir() {
 		// Check to see if we have readdirCache that indicates the
@@ -72,6 +80,10 @@ func (i *inodeOperations) Lookup(ctx context.Context, dir *fs.Inode, name string
 //
 // Ownership is currently ignored.
 func (i *inodeOperations) Create(ctx context.Context, dir *fs.Inode, name string, flags fs.FileFlags, perm fs.FilePermissions) (*fs.File, error) {
+	if len(name) > maxFilenameLen {
+		return nil, syserror.ENAMETOOLONG
+	}
+
 	// Create replaces the directory fid with the newly created/opened
 	// file, so clone this directory so it doesn't change out from under
 	// this node.
@@ -97,10 +109,11 @@ func (i *inodeOperations) Create(ctx context.Context, dir *fs.Inode, name string
 	hostFile, err := newFile.create(ctx, name, openFlags, p9.FileMode(perm.LinuxMode()), p9.UID(owner.UID), p9.GID(owner.GID))
 	if err != nil {
 		// Could not create the file.
+		newFile.close(ctx)
 		return nil, err
 	}
 
-	i.touchModificationTime(ctx, dir)
+	i.touchModificationAndStatusChangeTime(ctx, dir)
 
 	// Get an unopened p9.File for the file we created so that it can be cloned
 	// and re-opened multiple times after creation, while also getting its
@@ -108,11 +121,18 @@ func (i *inodeOperations) Create(ctx context.Context, dir *fs.Inode, name string
 	qids, unopened, mask, p9attr, err := i.fileState.file.walkGetAttr(ctx, []string{name})
 	if err != nil {
 		newFile.close(ctx)
+		if hostFile != nil {
+			hostFile.Close()
+		}
 		return nil, err
 	}
 	if len(qids) != 1 {
 		log.Warningf("WalkGetAttr(%s) succeeded, but returned %d QIDs (%v), wanted 1", name, len(qids), qids)
 		newFile.close(ctx)
+		if hostFile != nil {
+			hostFile.Close()
+		}
+		unopened.close(ctx)
 		return nil, syserror.EIO
 	}
 	qid := qids[0]
@@ -139,16 +159,24 @@ func (i *inodeOperations) Create(ctx context.Context, dir *fs.Inode, name string
 
 // CreateLink uses Create to create a symlink between oldname and newname.
 func (i *inodeOperations) CreateLink(ctx context.Context, dir *fs.Inode, oldname string, newname string) error {
+	if len(newname) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
 	owner := fs.FileOwnerFromContext(ctx)
 	if _, err := i.fileState.file.symlink(ctx, oldname, newname, p9.UID(owner.UID), p9.GID(owner.GID)); err != nil {
 		return err
 	}
-	i.touchModificationTime(ctx, dir)
+	i.touchModificationAndStatusChangeTime(ctx, dir)
 	return nil
 }
 
 // CreateHardLink implements InodeOperations.CreateHardLink.
 func (i *inodeOperations) CreateHardLink(ctx context.Context, inode *fs.Inode, target *fs.Inode, newName string) error {
+	if len(newName) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
 	targetOpts, ok := target.InodeOperations.(*inodeOperations)
 	if !ok {
 		return syscall.EXDEV
@@ -161,18 +189,24 @@ func (i *inodeOperations) CreateHardLink(ctx context.Context, inode *fs.Inode, t
 		// Increase link count.
 		targetOpts.cachingInodeOps.IncLinks(ctx)
 	}
-	i.touchModificationTime(ctx, inode)
+	i.touchModificationAndStatusChangeTime(ctx, inode)
 	return nil
 }
 
 // CreateDirectory uses Create to create a directory named s under inodeOperations.
 func (i *inodeOperations) CreateDirectory(ctx context.Context, dir *fs.Inode, s string, perm fs.FilePermissions) error {
+	if len(s) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
 	owner := fs.FileOwnerFromContext(ctx)
 	if _, err := i.fileState.file.mkdir(ctx, s, p9.FileMode(perm.LinuxMode()), p9.UID(owner.UID), p9.GID(owner.GID)); err != nil {
 		return err
 	}
 	if i.session().cachePolicy.cacheUAttrs(dir) {
 		// Increase link count.
+		//
+		// N.B. This will update the modification time.
 		i.cachingInodeOps.IncLinks(ctx)
 	}
 	if i.session().cachePolicy.cacheReaddir() {
@@ -184,6 +218,10 @@ func (i *inodeOperations) CreateDirectory(ctx context.Context, dir *fs.Inode, s 
 
 // Bind implements InodeOperations.Bind.
 func (i *inodeOperations) Bind(ctx context.Context, dir *fs.Inode, name string, ep transport.BoundEndpoint, perm fs.FilePermissions) (*fs.Dirent, error) {
+	if len(name) > maxFilenameLen {
+		return nil, syserror.ENAMETOOLONG
+	}
+
 	if i.session().endpoints == nil {
 		return nil, syscall.EOPNOTSUPP
 	}
@@ -210,7 +248,7 @@ func (i *inodeOperations) Bind(ctx context.Context, dir *fs.Inode, name string, 
 	// We're not going to use this file.
 	hostFile.Close()
 
-	i.touchModificationTime(ctx, dir)
+	i.touchModificationAndStatusChangeTime(ctx, dir)
 
 	// Get the attributes of the file to create inode key.
 	qid, mask, attr, err := getattr(ctx, newFile)
@@ -244,14 +282,30 @@ func (i *inodeOperations) Bind(ctx context.Context, dir *fs.Inode, name string, 
 	return childDir, nil
 }
 
-// CreateFifo implements fs.InodeOperations.CreateFifo. Gofer nodes do not support the
-// creation of fifos and always returns EOPNOTSUPP.
-func (*inodeOperations) CreateFifo(context.Context, *fs.Inode, string, fs.FilePermissions) error {
-	return syscall.EOPNOTSUPP
+// CreateFifo implements fs.InodeOperations.CreateFifo.
+func (i *inodeOperations) CreateFifo(ctx context.Context, dir *fs.Inode, name string, perm fs.FilePermissions) error {
+	if len(name) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
+	owner := fs.FileOwnerFromContext(ctx)
+	mode := p9.FileMode(perm.LinuxMode()) | p9.ModeNamedPipe
+
+	// N.B. FIFOs use major/minor numbers 0.
+	if _, err := i.fileState.file.mknod(ctx, name, mode, 0, 0, p9.UID(owner.UID), p9.GID(owner.GID)); err != nil {
+		return err
+	}
+
+	i.touchModificationAndStatusChangeTime(ctx, dir)
+	return nil
 }
 
 // Remove implements InodeOperations.Remove.
 func (i *inodeOperations) Remove(ctx context.Context, dir *fs.Inode, name string) error {
+	if len(name) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
 	var key device.MultiDeviceKey
 	removeSocket := false
 	if i.session().endpoints != nil {
@@ -277,13 +331,17 @@ func (i *inodeOperations) Remove(ctx context.Context, dir *fs.Inode, name string
 	if removeSocket {
 		i.session().endpoints.remove(key)
 	}
-	i.touchModificationTime(ctx, dir)
+	i.touchModificationAndStatusChangeTime(ctx, dir)
 
 	return nil
 }
 
 // Remove implements InodeOperations.RemoveDirectory.
 func (i *inodeOperations) RemoveDirectory(ctx context.Context, dir *fs.Inode, name string) error {
+	if len(name) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
 	// 0x200 = AT_REMOVEDIR.
 	if err := i.fileState.file.unlinkAt(ctx, name, 0x200); err != nil {
 		return err
@@ -300,7 +358,11 @@ func (i *inodeOperations) RemoveDirectory(ctx context.Context, dir *fs.Inode, na
 }
 
 // Rename renames this node.
-func (i *inodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (i *inodeOperations) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+	if len(newName) > maxFilenameLen {
+		return syserror.ENAMETOOLONG
+	}
+
 	// Unwrap the new parent to a *inodeOperations.
 	newParentInodeOperations, ok := newParent.InodeOperations.(*inodeOperations)
 	if !ok {
@@ -341,12 +403,17 @@ func (i *inodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldNa
 			newParentInodeOperations.markDirectoryDirty()
 		}
 	}
+
+	// Rename always updates ctime.
+	if i.session().cachePolicy.cacheUAttrs(inode) {
+		i.cachingInodeOps.TouchStatusChangeTime(ctx)
+	}
 	return nil
 }
 
-func (i *inodeOperations) touchModificationTime(ctx context.Context, inode *fs.Inode) {
+func (i *inodeOperations) touchModificationAndStatusChangeTime(ctx context.Context, inode *fs.Inode) {
 	if i.session().cachePolicy.cacheUAttrs(inode) {
-		i.cachingInodeOps.TouchModificationTime(ctx)
+		i.cachingInodeOps.TouchModificationAndStatusChangeTime(ctx)
 	}
 	if i.session().cachePolicy.cacheReaddir() {
 		// Invalidate readdir cache.

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,14 +31,16 @@ import (
 // TestFileOperations is an implementation of the File interface. It provides all
 // required methods.
 type TestFileOperations struct {
-	fsutil.FileNoopRelease   `state:"nosave"`
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
-	waiter.AlwaysReady       `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 }
 
 // NewTestFile creates and initializes a new test file.

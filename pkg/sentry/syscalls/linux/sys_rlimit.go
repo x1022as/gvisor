@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -106,7 +106,13 @@ func prlimit64(t *kernel.Task, resource limits.LimitType, newLim *limits.Limit) 
 	if _, ok := setableLimits[resource]; !ok {
 		return limits.Limit{}, syserror.EPERM
 	}
-	oldLim, err := t.ThreadGroup().Limits().Set(resource, *newLim)
+
+	// "A privileged process (under Linux: one with the CAP_SYS_RESOURCE
+	// capability in the initial user namespace) may make arbitrary changes
+	// to either limit value."
+	privileged := t.HasCapabilityIn(linux.CAP_SYS_RESOURCE, t.Kernel().RootUserNamespace())
+
+	oldLim, err := t.ThreadGroup().Limits().Set(resource, *newLim, privileged)
 	if err != nil {
 		return limits.Limit{}, err
 	}

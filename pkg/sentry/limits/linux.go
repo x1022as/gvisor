@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -95,6 +95,6 @@ func NewLinuxDistroLimitSet() (*LimitSet, error) {
 	// 1,048,576 ought to be enough for anyone.
 	l := ls.Get(ProcessCount)
 	l.Cur = 1 << 20
-	ls.Set(ProcessCount, l)
+	ls.Set(ProcessCount, l, true /* privileged */)
 	return ls, nil
 }

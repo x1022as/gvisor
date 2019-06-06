@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -136,7 +136,7 @@ func (m *SpecialMappable) Length() uint64 {
 // NewSharedAnonMappable returns a SpecialMappable that implements the
 // semantics of mmap(MAP_SHARED|MAP_ANONYMOUS) and mappings of /dev/zero.
 //
-// TODO: The use of SpecialMappable is a lazy code reuse hack. Linux
+// TODO(jamieliu): The use of SpecialMappable is a lazy code reuse hack. Linux
 // uses an ephemeral file created by mm/shmem.c:shmem_zero_setup(); we should
 // do the same to get non-zero device and inode IDs.
 func NewSharedAnonMappable(length uint64, mfp pgalloc.MemoryFileProvider) (*SpecialMappable, error) {

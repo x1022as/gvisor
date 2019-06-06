@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,36 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
 )
+
+// Dumpability describes if and how core dumps should be created.
+type Dumpability int
+
+const (
+	// NotDumpable indicates that core dumps should never be created.
+	NotDumpable Dumpability = iota
+
+	// UserDumpable indicates that core dumps should be created, owned by
+	// the current user.
+	UserDumpable
+
+	// RootDumpable indicates that core dumps should be created, owned by
+	// root.
+	RootDumpable
+)
+
+// Dumpability returns the dumpability.
+func (mm *MemoryManager) Dumpability() Dumpability {
+	mm.metadataMu.Lock()
+	defer mm.metadataMu.Unlock()
+	return mm.dumpability
+}
+
+// SetDumpability sets the dumpability.
+func (mm *MemoryManager) SetDumpability(d Dumpability) {
+	mm.metadataMu.Lock()
+	defer mm.metadataMu.Unlock()
+	mm.dumpability = d
+}
 
 // ArgvStart returns the start of the application argument vector.
 //

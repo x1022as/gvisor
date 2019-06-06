@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -48,6 +48,10 @@ func (s *sleeper) Cancel() {
 	s.ch <- struct{}{}
 }
 
+func (s *sleeper) Interrupted() bool {
+	return len(s.ch) != 0
+}
+
 type openResult struct {
 	*fs.File
 	error
@@ -58,7 +62,9 @@ var perms fs.FilePermissions = fs.FilePermissions{
 }
 
 func testOpenOrDie(ctx context.Context, t *testing.T, n fs.InodeOperations, flags fs.FileFlags, doneChan chan<- struct{}) (*fs.File, error) {
-	file, err := n.GetFile(ctx, nil, flags)
+	inode := fs.NewMockInode(ctx, fs.NewMockMountSource(nil), fs.StableAttr{Type: fs.Pipe})
+	d := fs.NewDirent(inode, "pipe")
+	file, err := n.GetFile(ctx, d, flags)
 	if err != nil {
 		t.Fatalf("open with flags %+v failed: %v", flags, err)
 	}
@@ -69,7 +75,9 @@ func testOpenOrDie(ctx context.Context, t *testing.T, n fs.InodeOperations, flag
 }
 
 func testOpen(ctx context.Context, t *testing.T, n fs.InodeOperations, flags fs.FileFlags, resChan chan<- openResult) (*fs.File, error) {
-	file, err := n.GetFile(ctx, nil, flags)
+	inode := fs.NewMockInode(ctx, fs.NewMockMountSource(nil), fs.StableAttr{Type: fs.Pipe})
+	d := fs.NewDirent(inode, "pipe")
+	file, err := n.GetFile(ctx, d, flags)
 	if resChan != nil {
 		resChan <- openResult{file, err}
 	}

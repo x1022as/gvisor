@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -246,6 +246,10 @@ var allowedSyscalls = seccomp.SyscallRules{
 	},
 	syscall.SYS_SETITIMER: {},
 	syscall.SYS_SHUTDOWN: []seccomp.Rule{
+		// Used by fs/host to shutdown host sockets.
+		{seccomp.AllowAny{}, seccomp.AllowValue(syscall.SHUT_RD)},
+		{seccomp.AllowAny{}, seccomp.AllowValue(syscall.SHUT_WR)},
+		// Used by unet to shutdown connections.
 		{seccomp.AllowAny{}, seccomp.AllowValue(syscall.SHUT_RDWR)},
 	},
 	syscall.SYS_SIGALTSTACK:     {},

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -95,7 +95,7 @@ type inodeFileState struct {
 
 // ReadToBlocksAt implements fsutil.CachedFileObject.ReadToBlocksAt.
 func (i *inodeFileState) ReadToBlocksAt(ctx context.Context, dsts safemem.BlockSeq, offset uint64) (uint64, error) {
-	// TODO: Using safemem.FromIOReader here is wasteful for two
+	// TODO(jamieliu): Using safemem.FromIOReader here is wasteful for two
 	// reasons:
 	//
 	// - Using preadv instead of iterated preads saves on host system calls.
@@ -161,6 +161,11 @@ func (i *inodeFileState) unstableAttr(ctx context.Context) (fs.UnstableAttr, err
 		return fs.UnstableAttr{}, err
 	}
 	return unstableAttr(i.mops, &s), nil
+}
+
+// SetMaskedAttributes implements fsutil.CachedFileObject.SetMaskedAttributes.
+func (i *inodeFileState) Allocate(_ context.Context, offset, length int64) error {
+	return syscall.Fallocate(i.FD(), 0, offset, length)
 }
 
 // inodeOperations implements fs.InodeOperations.
@@ -282,7 +287,7 @@ func (*inodeOperations) CreateHardLink(context.Context, *fs.Inode, *fs.Inode, st
 
 // CreateFifo implements fs.InodeOperations.CreateFifo.
 func (*inodeOperations) CreateFifo(context.Context, *fs.Inode, string, fs.FilePermissions) error {
-	return syserror.EOPNOTSUPP
+	return syserror.EPERM
 }
 
 // Remove implements fs.InodeOperations.Remove.
@@ -296,7 +301,7 @@ func (i *inodeOperations) RemoveDirectory(ctx context.Context, dir *fs.Inode, na
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (i *inodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (i *inodeOperations) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	op, ok := oldParent.InodeOperations.(*inodeOperations)
 	if !ok {
 		return syscall.EXDEV
@@ -325,7 +330,7 @@ func (i *inodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags fs.Fi
 
 // canMap returns true if this fs.Inode can be memory mapped.
 func canMap(inode *fs.Inode) bool {
-	// FIXME: Some obscure character devices can be mapped.
+	// FIXME(b/38213152): Some obscure character devices can be mapped.
 	return fs.IsFile(inode.StableAttr)
 }
 
@@ -397,6 +402,19 @@ func (i *inodeOperations) Truncate(ctx context.Context, inode *fs.Inode, size in
 	return i.cachingInodeOps.Truncate(ctx, inode, size)
 }
 
+// Allocate implements fs.InodeOperations.Allocate.
+func (i *inodeOperations) Allocate(ctx context.Context, inode *fs.Inode, offset, length int64) error {
+	// Is the file not memory-mappable?
+	if !canMap(inode) {
+		// Then just send the call to the FD, the host will synchronize the metadata
+		// update with any host inode and page cache.
+		return i.fileState.Allocate(ctx, offset, length)
+	}
+	// Otherwise we need to go through cachingInodeOps, even if the host page
+	// cache is in use, to invalidate private copies of truncated pages.
+	return i.cachingInodeOps.Allocate(ctx, offset, length)
+}
+
 // WriteOut implements fs.InodeOperations.WriteOut.
 func (i *inodeOperations) WriteOut(ctx context.Context, inode *fs.Inode) error {
 	// Have we been using host kernel metadata caches?
@@ -428,15 +446,15 @@ func (i *inodeOperations) StatFS(context.Context) (fs.Info, error) {
 }
 
 // AddLink implements fs.InodeOperations.AddLink.
-// FIXME: Remove this from InodeOperations altogether.
+// FIXME(b/63117438): Remove this from InodeOperations altogether.
 func (i *inodeOperations) AddLink() {}
 
 // DropLink implements fs.InodeOperations.DropLink.
-// FIXME: Remove this from InodeOperations altogether.
+// FIXME(b/63117438): Remove this from InodeOperations altogether.
 func (i *inodeOperations) DropLink() {}
 
 // NotifyStatusChange implements fs.InodeOperations.NotifyStatusChange.
-// FIXME: Remove this from InodeOperations altogether.
+// FIXME(b/63117438): Remove this from InodeOperations altogether.
 func (i *inodeOperations) NotifyStatusChange(ctx context.Context) {}
 
 // readdirAll returns all of the directory entries in i.

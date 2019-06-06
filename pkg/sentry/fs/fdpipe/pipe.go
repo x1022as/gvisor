@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,13 +37,15 @@ import (
 //
 // +stateify savable
 type pipeOperations struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
-	waiter.Queue             `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.Queue                    `state:"nosave"`
 
 	// flags are the flags used to open the pipe.
 	flags fs.FileFlags `state:".(fs.FileFlags)"`

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -103,7 +103,7 @@ TEST_F(AIOTest, BasicWrite) {
   // aio implementation uses aio_ring. gVisor doesn't and returns all zeroes.
   // Linux implements aio_ring, so skip the zeroes check.
   //
-  // TODO: Remove when gVisor implements aio_ring.
+  // TODO(b/65486370): Remove when gVisor implements aio_ring.
   auto ring = reinterpret_cast<struct aio_ring*>(ctx_);
   auto magic = IsRunningOnGvisor() ? 0 : AIO_RING_MAGIC;
   EXPECT_EQ(ring->magic, magic);
@@ -397,9 +397,9 @@ TEST_P(AIOReadWriteParamTest, BadOffset) {
   ASSERT_THAT(Submit(1, cbs), SyscallFailsWithErrno(EINVAL));
 }
 
-INSTANTIATE_TEST_CASE_P(BadOffset, AIOReadWriteParamTest,
-                        ::testing::Values(IOCB_CMD_PREAD, IOCB_CMD_PWRITE,
-                                          IOCB_CMD_PREADV, IOCB_CMD_PWRITEV));
+INSTANTIATE_TEST_SUITE_P(BadOffset, AIOReadWriteParamTest,
+                         ::testing::Values(IOCB_CMD_PREAD, IOCB_CMD_PWRITE,
+                                           IOCB_CMD_PREADV, IOCB_CMD_PWRITEV));
 
 class AIOVectorizedParamTest : public AIOTest,
                                public ::testing::WithParamInterface<int> {};
@@ -426,8 +426,8 @@ TEST_P(AIOVectorizedParamTest, BadIOVecs) {
   ASSERT_THAT(Submit(1, cbs), SyscallFailsWithErrno(EFAULT));
 }
 
-INSTANTIATE_TEST_CASE_P(BadIOVecs, AIOVectorizedParamTest,
-                        ::testing::Values(IOCB_CMD_PREADV, IOCB_CMD_PWRITEV));
+INSTANTIATE_TEST_SUITE_P(BadIOVecs, AIOVectorizedParamTest,
+                         ::testing::Values(IOCB_CMD_PREADV, IOCB_CMD_PWRITEV));
 
 }  // namespace testing
 }  // namespace gvisor

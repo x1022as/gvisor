@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ type CreateOps struct {
 // +stateify savable
 type Dir struct {
 	fsutil.InodeGenericChecker `state:"nosave"`
+	fsutil.InodeIsDirAllocate  `state:"nosave"`
 	fsutil.InodeIsDirTruncate  `state:"nosave"`
 	fsutil.InodeNoopRelease    `state:"nosave"`
 	fsutil.InodeNoopWriteOut   `state:"nosave"`
@@ -111,7 +112,7 @@ func NewDir(ctx context.Context, contents map[string]*fs.Inode, owner fs.FileOwn
 }
 
 // addChildLocked add the child inode, inheriting its reference.
-func (d *Dir) addChildLocked(name string, inode *fs.Inode) {
+func (d *Dir) addChildLocked(ctx context.Context, name string, inode *fs.Inode) {
 	d.children[name] = inode
 	d.dentryMap.Add(name, fs.DentAttr{
 		Type:    inode.StableAttr.Type,
@@ -122,18 +123,25 @@ func (d *Dir) addChildLocked(name string, inode *fs.Inode) {
 	// corresponding to '..' from the subdirectory.
 	if fs.IsDir(inode.StableAttr) {
 		d.AddLink()
+		// ctime updated below.
 	}
 
 	// Given we're now adding this inode to the directory we must also
-	// increase its link count. Similarly we decremented it in removeChildLocked.
+	// increase its link count. Similarly we decrement it in removeChildLocked.
+	//
+	// Changing link count updates ctime.
 	inode.AddLink()
+	inode.InodeOperations.NotifyStatusChange(ctx)
+
+	// We've change the directory. This always updates our mtime and ctime.
+	d.NotifyModificationAndStatusChange(ctx)
 }
 
 // AddChild adds a child to this dir.
 func (d *Dir) AddChild(ctx context.Context, name string, inode *fs.Inode) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.addChildLocked(name, inode)
+	d.addChildLocked(ctx, name, inode)
 }
 
 // FindChild returns (child, true) if the directory contains name.
@@ -178,20 +186,28 @@ func (d *Dir) removeChildLocked(ctx context.Context, name string) (*fs.Inode, er
 	// link count which was the child's ".." directory entry.
 	if fs.IsDir(inode.StableAttr) {
 		d.DropLink()
+		// ctime changed below.
 	}
-
-	// Update ctime.
-	inode.InodeOperations.NotifyStatusChange(ctx)
 
 	// Given we're now removing this inode to the directory we must also
 	// decrease its link count. Similarly it is increased in addChildLocked.
+	//
+	// Changing link count updates ctime.
 	inode.DropLink()
+	inode.InodeOperations.NotifyStatusChange(ctx)
+
+	// We've change the directory. This always updates our mtime and ctime.
+	d.NotifyModificationAndStatusChange(ctx)
 
 	return inode, nil
 }
 
 // Remove removes the named non-directory.
 func (d *Dir) Remove(ctx context.Context, _ *fs.Inode, name string) error {
+	if len(name) > linux.NAME_MAX {
+		return syserror.ENAMETOOLONG
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	inode, err := d.removeChildLocked(ctx, name)
@@ -206,6 +222,10 @@ func (d *Dir) Remove(ctx context.Context, _ *fs.Inode, name string) error {
 
 // RemoveDirectory removes the named directory.
 func (d *Dir) RemoveDirectory(ctx context.Context, _ *fs.Inode, name string) error {
+	if len(name) > linux.NAME_MAX {
+		return syserror.ENAMETOOLONG
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -234,6 +254,10 @@ func (d *Dir) RemoveDirectory(ctx context.Context, _ *fs.Inode, name string) err
 
 // Lookup loads an inode at p into a Dirent.
 func (d *Dir) Lookup(ctx context.Context, _ *fs.Inode, p string) (*fs.Dirent, error) {
+	if len(p) > linux.NAME_MAX {
+		return nil, syserror.ENAMETOOLONG
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -250,8 +274,6 @@ func (d *Dir) Lookup(ctx context.Context, _ *fs.Inode, p string) (*fs.Dirent, er
 
 // walkLocked must be called with d.mu held.
 func (d *Dir) walkLocked(ctx context.Context, p string) (*fs.Inode, error) {
-	d.NotifyAccess(ctx)
-
 	// Lookup a child node.
 	if inode, ok := d.children[p]; ok {
 		return inode, nil
@@ -265,6 +287,10 @@ func (d *Dir) walkLocked(ctx context.Context, p string) (*fs.Inode, error) {
 // createInodeOperationsCommon creates a new child node at this dir by calling
 // makeInodeOperations. It is the common logic for creating a new child.
 func (d *Dir) createInodeOperationsCommon(ctx context.Context, name string, makeInodeOperations func() (*fs.Inode, error)) (*fs.Inode, error) {
+	if len(name) > linux.NAME_MAX {
+		return nil, syserror.ENAMETOOLONG
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -273,8 +299,7 @@ func (d *Dir) createInodeOperationsCommon(ctx context.Context, name string, make
 		return nil, err
 	}
 
-	d.addChildLocked(name, inode)
-	d.NotifyModification(ctx)
+	d.addChildLocked(ctx, name, inode)
 
 	return inode, nil
 }
@@ -314,6 +339,10 @@ func (d *Dir) CreateLink(ctx context.Context, dir *fs.Inode, oldname, newname st
 
 // CreateHardLink creates a new hard link.
 func (d *Dir) CreateHardLink(ctx context.Context, dir *fs.Inode, target *fs.Inode, name string) error {
+	if len(name) > linux.NAME_MAX {
+		return syserror.ENAMETOOLONG
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -321,11 +350,7 @@ func (d *Dir) CreateHardLink(ctx context.Context, dir *fs.Inode, target *fs.Inod
 	target.IncRef()
 
 	// The link count will be incremented in addChildLocked.
-	d.addChildLocked(name, target)
-	d.NotifyModification(ctx)
-
-	// Update ctime.
-	target.InodeOperations.NotifyStatusChange(ctx)
+	d.addChildLocked(ctx, name, target)
 
 	return nil
 }
@@ -338,8 +363,6 @@ func (d *Dir) CreateDirectory(ctx context.Context, dir *fs.Inode, name string, p
 	_, err := d.createInodeOperationsCommon(ctx, name, func() (*fs.Inode, error) {
 		return d.NewDir(ctx, dir, perms)
 	})
-	// TODO: Support updating status times, as those should be
-	// updated by links.
 	return err
 }
 
@@ -380,7 +403,7 @@ func (d *Dir) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFlags
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (*Dir) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (*Dir) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return Rename(ctx, oldParent.InodeOperations, oldName, newParent.InodeOperations, newName, replacement)
 }
 
@@ -388,7 +411,8 @@ func (*Dir) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, new
 //
 // +stateify savable
 type dirFileOperations struct {
-	fsutil.DirFileOperations `state:"nosave"`
+	fsutil.DirFileOperations        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	// dirCursor contains the name of the last directory entry that was
 	// serialized.
@@ -417,7 +441,9 @@ func (dfo *dirFileOperations) IterateDir(ctx context.Context, dirCtx *fs.DirCtx,
 // Readdir implements FileOperations.Readdir.
 func (dfo *dirFileOperations) Readdir(ctx context.Context, file *fs.File, serializer fs.DentrySerializer) (int64, error) {
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 	dirCtx := &fs.DirCtx{
 		Serializer: serializer,
 		DirCursor:  &dfo.dirCursor,
@@ -462,6 +488,9 @@ func Rename(ctx context.Context, oldParent fs.InodeOperations, oldName string, n
 	if !ok {
 		return syserror.EXDEV
 	}
+	if len(newName) > linux.NAME_MAX {
+		return syserror.ENAMETOOLONG
+	}
 
 	np.mu.Lock()
 	defer np.mu.Unlock()
@@ -499,10 +528,7 @@ func Rename(ctx context.Context, oldParent fs.InodeOperations, oldName string, n
 	// Do the swap.
 	n := op.children[oldName]
 	op.removeChildLocked(ctx, oldName)
-	np.addChildLocked(newName, n)
-
-	// Update ctime.
-	n.InodeOperations.NotifyStatusChange(ctx)
+	np.addChildLocked(ctx, newName, n)
 
 	return nil
 }

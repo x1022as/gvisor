@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,13 +38,15 @@ import (
 //
 // +stateify savable
 type EventOperations struct {
-	fsutil.FileNoopRelease   `state:"nosave"`
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	// Mutex that protects accesses to the fields of this event.
 	mu sync.Mutex `state:"nosave"`
@@ -67,6 +69,8 @@ type EventOperations struct {
 func New(ctx context.Context, initVal uint64, semMode bool) *fs.File {
 	// name matches fs/eventfd.c:eventfd_file_create.
 	dirent := fs.NewDirent(anon.NewInode(ctx), "anon_inode:[eventfd]")
+	// Release the initial dirent reference after NewFile takes a reference.
+	defer dirent.DecRef()
 	return fs.NewFile(ctx, dirent, fs.FileFlags{Read: true, Write: true}, &EventOperations{
 		val:     initVal,
 		semMode: semMode,

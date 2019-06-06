@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,13 +18,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
 #include <ctime>
+#include <iostream>
 #include <vector>
 
 #include "absl/base/attributes.h"
@@ -54,8 +54,8 @@ Platform GvisorPlatform() {
   if (strcmp(env, "kvm") == 0) {
     return Platform::kKVM;
   }
-  LOG(FATAL) << "unknown platform " << env;
-  __builtin_unreachable();
+  std::cerr << "unknown platform " << env;
+  abort();
 }
 
 // Inline cpuid instruction.  Preserve %ebx/%rbx register. In PIC compilations
@@ -210,24 +210,9 @@ std::vector<std::vector<struct iovec>> GenerateIovecs(uint64_t total_size,
   return result;
 }
 
-void SleepSafe(absl::Duration duration) {
-  if (duration == absl::ZeroDuration()) {
-    return;
-  }
-
-  struct timespec ts = absl::ToTimespec(duration);
-  int ret;
-  while (1) {
-    ret = syscall(__NR_nanosleep, &ts, &ts);
-    if (ret == 0 || (ret <= 0 && errno != EINTR)) {
-      break;
-    }
-  }
-}
-
 uint64_t Megabytes(uint64_t n) {
   // Overflow check, upper 20 bits in n shouldn't be set.
-  CHECK(!(0xfffff00000000000 & n));
+  TEST_CHECK(!(0xfffff00000000000 & n));
   return n << 20;
 }
 

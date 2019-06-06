@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ import (
 	"sync"
 
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
@@ -72,11 +71,7 @@ func (a *FileAsync) Callback(e *waiter.Entry) {
 		a.requester.EffectiveKUID == c.RealKUID ||
 		a.requester.RealKUID == c.SavedKUID ||
 		a.requester.RealKUID == c.RealKUID {
-		t.SendSignal(&arch.SignalInfo{
-			Signo: int32(linux.SIGIO),
-			// SEND_SIG_PRIV
-			Code: arch.SignalInfoKernel,
-		})
+		t.SendSignal(kernel.SignalInfoPriv(linux.SIGIO))
 	}
 	a.mu.Unlock()
 }

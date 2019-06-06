@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,8 +44,8 @@ var (
 //
 // Metrics are not saved across save/restore and thus reset to zero on restore.
 //
-// TODO: Support non-cumulative metrics.
-// TODO: Support metric fields.
+// TODO(b/67298402): Support non-cumulative metrics.
+// TODO(b/67298427): Support metric fields.
 //
 type Uint64Metric struct {
 	// value is the actual value of the metric. It must be accessed

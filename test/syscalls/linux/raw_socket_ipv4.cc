@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,25 +16,30 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
 #include <algorithm>
 
 #include "gtest/gtest.h"
 #include "test/syscalls/linux/socket_test_util.h"
+#include "test/syscalls/linux/unix_domain_socket_test_util.h"
 #include "test/util/capability_util.h"
 #include "test/util/file_descriptor.h"
 #include "test/util/test_util.h"
+
+// Note: in order to run these tests, /proc/sys/net/ipv4/ping_group_range will
+// need to be configured to let the superuser create ping sockets (see icmp(7)).
 
 namespace gvisor {
 namespace testing {
 
 namespace {
 
-// Fixture for tests parameterized by address family (currently only AF_INET).
-class RawSocketTest : public ::testing::Test {
+// Fixture for tests parameterized by protocol.
+class RawSocketTest : public ::testing::TestWithParam<int> {
  protected:
   // Creates a socket to be used in tests.
   void SetUp() override;
@@ -42,20 +47,17 @@ class RawSocketTest : public ::testing::Test {
   // Closes the socket created by SetUp().
   void TearDown() override;
 
-  // Checks that both an ICMP echo request and reply are received. Calls should
-  // be wrapped in ASSERT_NO_FATAL_FAILURE.
-  void ExpectICMPSuccess(const struct icmphdr& icmp);
+  // Sends buf via s_.
+  void SendBuf(const char* buf, int buf_len);
 
-  void SendEmptyICMP(const struct icmphdr& icmp);
+  // Sends buf to the provided address via the provided socket.
+  void SendBufTo(int sock, const struct sockaddr_in& addr, const char* buf,
+                 int buf_len);
 
-  void SendEmptyICMPTo(int sock, struct sockaddr_in* addr,
-                       const struct icmphdr& icmp);
+  // Reads from s_ into recv_buf.
+  void ReceiveBuf(char* recv_buf, size_t recv_buf_len);
 
-  void ReceiveICMP(char* recv_buf, size_t recv_buf_len, size_t expected_size,
-                   struct sockaddr_in* src);
-
-  void ReceiveICMPFrom(char* recv_buf, size_t recv_buf_len,
-                       size_t expected_size, struct sockaddr_in* src, int sock);
+  int Protocol() { return GetParam(); }
 
   // The socket used for both reading and writing.
   int s_;
@@ -67,7 +69,7 @@ class RawSocketTest : public ::testing::Test {
 void RawSocketTest::SetUp() {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
-  ASSERT_THAT(s_ = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP), SyscallSucceeds());
+  ASSERT_THAT(s_ = socket(AF_INET, SOCK_RAW, Protocol()), SyscallSucceeds());
 
   addr_ = {};
 
@@ -85,166 +87,25 @@ void RawSocketTest::TearDown() {
 // We should be able to create multiple raw sockets for the same protocol.
 // BasicRawSocket::Setup creates the first one, so we only have to create one
 // more here.
-TEST_F(RawSocketTest, MultipleCreation) {
+TEST_P(RawSocketTest, MultipleCreation) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   int s2;
-  ASSERT_THAT(s2 = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP), SyscallSucceeds());
+  ASSERT_THAT(s2 = socket(AF_INET, SOCK_RAW, Protocol()), SyscallSucceeds());
 
   ASSERT_THAT(close(s2), SyscallSucceeds());
 }
 
-// Send and receive an ICMP packet.
-TEST_F(RawSocketTest, SendAndReceive) {
-  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
-
-  // Prepare and send an ICMP packet. Use arbitrary junk for checksum, sequence,
-  // and ID. None of that should matter for raw sockets - the kernel should
-  // still give us the packet.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.checksum = 2011;
-  icmp.un.echo.sequence = 2012;
-  icmp.un.echo.id = 2014;
-  ASSERT_NO_FATAL_FAILURE(SendEmptyICMP(icmp));
-
-  ASSERT_NO_FATAL_FAILURE(ExpectICMPSuccess(icmp));
-}
-
-// We should be able to create multiple raw sockets for the same protocol and
-// receive the same packet on both.
-TEST_F(RawSocketTest, MultipleSocketReceive) {
-  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
-
-  FileDescriptor s2 =
-      ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_INET, SOCK_RAW, IPPROTO_ICMP));
-
-  // Prepare and send an ICMP packet. Use arbitrary junk for checksum, sequence,
-  // and ID. None of that should matter for raw sockets - the kernel should
-  // still give us the packet.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.checksum = 2014;
-  icmp.un.echo.sequence = 2016;
-  icmp.un.echo.id = 2018;
-  ASSERT_NO_FATAL_FAILURE(SendEmptyICMP(icmp));
-
-  // Both sockets will receive the echo request and reply in indeterminate
-  // order, so we'll need to read 2 packets from each.
-
-  // Receive on socket 1.
-  constexpr int kBufSize = 256;
-  std::vector<char[kBufSize]> recv_buf1(2);
-  struct sockaddr_in src;
-  for (int i = 0; i < 2; i++) {
-    ASSERT_NO_FATAL_FAILURE(ReceiveICMP(recv_buf1[i],
-                                        ABSL_ARRAYSIZE(recv_buf1[i]),
-                                        sizeof(struct icmphdr), &src));
-    EXPECT_EQ(memcmp(&src, &addr_, sizeof(sockaddr_in)), 0);
-  }
-
-  // Receive on socket 2.
-  std::vector<char[kBufSize]> recv_buf2(2);
-  for (int i = 0; i < 2; i++) {
-    ASSERT_NO_FATAL_FAILURE(
-        ReceiveICMPFrom(recv_buf2[i], ABSL_ARRAYSIZE(recv_buf2[i]),
-                        sizeof(struct icmphdr), &src, s2.get()));
-    EXPECT_EQ(memcmp(&src, &addr_, sizeof(sockaddr_in)), 0);
-  }
-
-  // Ensure both sockets receive identical packets.
-  int types[] = {ICMP_ECHO, ICMP_ECHOREPLY};
-  for (int type : types) {
-    auto match_type = [=](char buf[kBufSize]) {
-      struct icmphdr* icmp =
-          reinterpret_cast<struct icmphdr*>(buf + sizeof(struct iphdr));
-      return icmp->type == type;
-    };
-    const char* icmp1 =
-        *std::find_if(recv_buf1.begin(), recv_buf1.end(), match_type);
-    const char* icmp2 =
-        *std::find_if(recv_buf2.begin(), recv_buf2.end(), match_type);
-    ASSERT_NE(icmp1, *recv_buf1.end());
-    ASSERT_NE(icmp2, *recv_buf2.end());
-    EXPECT_EQ(memcmp(icmp1 + sizeof(struct iphdr), icmp2 + sizeof(struct iphdr),
-                     sizeof(icmp)),
-              0);
-  }
-}
-
-// A raw ICMP socket and ping socket should both receive the ICMP packets
-// indended for the ping socket.
-TEST_F(RawSocketTest, RawAndPingSockets) {
-  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
-
-  FileDescriptor ping_sock =
-      ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP));
-
-  // Ping sockets take care of the ICMP ID and checksum.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.un.echo.sequence = *static_cast<unsigned short*>(&icmp.un.echo.sequence);
-  ASSERT_THAT(RetryEINTR(sendto)(ping_sock.get(), &icmp, sizeof(icmp), 0,
-                                 reinterpret_cast<struct sockaddr*>(&addr_),
-                                 sizeof(addr_)),
-              SyscallSucceedsWithValue(sizeof(icmp)));
-
-  // Both sockets will receive the echo request and reply in indeterminate
-  // order, so we'll need to read 2 packets from each.
-
-  // Receive on socket 1.
-  constexpr int kBufSize = 256;
-  std::vector<char[kBufSize]> recv_buf1(2);
-  struct sockaddr_in src;
-  for (int i = 0; i < 2; i++) {
-    ASSERT_NO_FATAL_FAILURE(
-        ReceiveICMP(recv_buf1[i], kBufSize, sizeof(struct icmphdr), &src));
-    EXPECT_EQ(memcmp(&src, &addr_, sizeof(sockaddr_in)), 0);
-  }
-
-  // Receive on socket 2.
-  std::vector<char[kBufSize]> recv_buf2(2);
-  for (int i = 0; i < 2; i++) {
-    ASSERT_THAT(RetryEINTR(recv)(ping_sock.get(), recv_buf2[i], kBufSize, 0),
-                SyscallSucceedsWithValue(sizeof(struct icmphdr)));
-  }
-
-  // Ensure both sockets receive identical packets.
-  int types[] = {ICMP_ECHO, ICMP_ECHOREPLY};
-  for (int type : types) {
-    auto match_type_ping = [=](char buf[kBufSize]) {
-      struct icmphdr* icmp = reinterpret_cast<struct icmphdr*>(buf);
-      return icmp->type == type;
-    };
-    auto match_type_raw = [=](char buf[kBufSize]) {
-      struct icmphdr* icmp =
-          reinterpret_cast<struct icmphdr*>(buf + sizeof(struct iphdr));
-      return icmp->type == type;
-    };
-
-    char *icmp1 =
-        *std::find_if(recv_buf1.begin(), recv_buf1.end(), match_type_raw);
-    char *icmp2 =
-        *std::find_if(recv_buf2.begin(), recv_buf2.end(), match_type_ping);
-    ASSERT_NE(icmp1, *recv_buf1.end());
-    ASSERT_NE(icmp2, *recv_buf2.end());
-    EXPECT_EQ(memcmp(icmp1 + sizeof(struct iphdr), icmp2, sizeof(icmp)), 0);
-  }
-}
-
 // Test that shutting down an unconnected socket fails.
-TEST_F(RawSocketTest, FailShutdownWithoutConnect) {
+TEST_P(RawSocketTest, FailShutdownWithoutConnect) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(shutdown(s_, SHUT_WR), SyscallFailsWithErrno(ENOTCONN));
   ASSERT_THAT(shutdown(s_, SHUT_RD), SyscallFailsWithErrno(ENOTCONN));
 }
 
-// Test that writing to a shutdown write socket fails.
-TEST_F(RawSocketTest, FailWritingToShutdown) {
+// Shutdown is a no-op for raw sockets (and datagram sockets in general).
+TEST_P(RawSocketTest, ShutdownWriteNoop) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
@@ -252,13 +113,14 @@ TEST_F(RawSocketTest, FailWritingToShutdown) {
       SyscallSucceeds());
   ASSERT_THAT(shutdown(s_, SHUT_WR), SyscallSucceeds());
 
-  char c;
-  ASSERT_THAT(RetryEINTR(write)(s_, &c, sizeof(c)),
-              SyscallFailsWithErrno(EPIPE));
+  // Arbitrary.
+  constexpr char kBuf[] = "noop";
+  ASSERT_THAT(RetryEINTR(write)(s_, kBuf, sizeof(kBuf)),
+              SyscallSucceedsWithValue(sizeof(kBuf)));
 }
 
-// Test that reading from a shutdown read socket gets nothing.
-TEST_F(RawSocketTest, FailReadingFromShutdown) {
+// Shutdown is a no-op for raw sockets (and datagram sockets in general).
+TEST_P(RawSocketTest, ShutdownReadNoop) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
@@ -266,19 +128,24 @@ TEST_F(RawSocketTest, FailReadingFromShutdown) {
       SyscallSucceeds());
   ASSERT_THAT(shutdown(s_, SHUT_RD), SyscallSucceeds());
 
-  char c;
-  ASSERT_THAT(read(s_, &c, sizeof(c)), SyscallSucceedsWithValue(0));
+  // Arbitrary.
+  constexpr char kBuf[] = "gdg";
+  ASSERT_NO_FATAL_FAILURE(SendBuf(kBuf, sizeof(kBuf)));
+
+  constexpr size_t kReadSize = sizeof(kBuf) + sizeof(struct iphdr);
+  char c[kReadSize];
+  ASSERT_THAT(read(s_, &c, sizeof(c)), SyscallSucceedsWithValue(kReadSize));
 }
 
 // Test that listen() fails.
-TEST_F(RawSocketTest, FailListen) {
+TEST_P(RawSocketTest, FailListen) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(listen(s_, 1), SyscallFailsWithErrno(ENOTSUP));
 }
 
 // Test that accept() fails.
-TEST_F(RawSocketTest, FailAccept) {
+TEST_P(RawSocketTest, FailAccept) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   struct sockaddr saddr;
@@ -287,30 +154,31 @@ TEST_F(RawSocketTest, FailAccept) {
 }
 
 // Test that getpeername() returns nothing before connect().
-TEST_F(RawSocketTest, FailGetPeerNameBeforeConnect) {
+TEST_P(RawSocketTest, FailGetPeerNameBeforeConnect) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   struct sockaddr saddr;
-  socklen_t addrlen;
+  socklen_t addrlen = sizeof(saddr);
   ASSERT_THAT(getpeername(s_, &saddr, &addrlen),
               SyscallFailsWithErrno(ENOTCONN));
 }
 
 // Test that getpeername() returns something after connect().
-TEST_F(RawSocketTest, GetPeerName) {
+TEST_P(RawSocketTest, GetPeerName) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
       connect(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
       SyscallSucceeds());
   struct sockaddr saddr;
-  socklen_t addrlen;
-  ASSERT_THAT(getpeername(s_, &saddr, &addrlen), SyscallSucceeds());
+  socklen_t addrlen = sizeof(saddr);
+  ASSERT_THAT(getpeername(s_, &saddr, &addrlen),
+              SyscallFailsWithErrno(ENOTCONN));
   ASSERT_GT(addrlen, 0);
 }
 
 // Test that the socket is writable immediately.
-TEST_F(RawSocketTest, PollWritableImmediately) {
+TEST_P(RawSocketTest, PollWritableImmediately) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   struct pollfd pfd = {};
@@ -320,7 +188,7 @@ TEST_F(RawSocketTest, PollWritableImmediately) {
 }
 
 // Test that the socket isn't readable before receiving anything.
-TEST_F(RawSocketTest, PollNotReadableInitially) {
+TEST_P(RawSocketTest, PollNotReadableInitially) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   // Try to receive data with MSG_DONTWAIT, which returns immediately if there's
@@ -331,12 +199,13 @@ TEST_F(RawSocketTest, PollNotReadableInitially) {
 }
 
 // Test that the socket becomes readable once something is written to it.
-TEST_F(RawSocketTest, PollTriggeredOnWrite) {
+TEST_P(RawSocketTest, PollTriggeredOnWrite) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   // Write something so that there's data to be read.
-  struct icmphdr icmp = {};
-  ASSERT_NO_FATAL_FAILURE(SendEmptyICMP(icmp));
+  // Arbitrary.
+  constexpr char kBuf[] = "JP5";
+  ASSERT_NO_FATAL_FAILURE(SendBuf(kBuf, sizeof(kBuf)));
 
   struct pollfd pfd = {};
   pfd.fd = s_;
@@ -345,56 +214,26 @@ TEST_F(RawSocketTest, PollTriggeredOnWrite) {
 }
 
 // Test that we can connect() to a valid IP (loopback).
-TEST_F(RawSocketTest, ConnectToLoopback) {
+TEST_P(RawSocketTest, ConnectToLoopback) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
       connect(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
       SyscallSucceeds());
-}
-
-// Test that connect() sends packets to the right place.
-TEST_F(RawSocketTest, SendAndReceiveViaConnect) {
-  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
-
-  ASSERT_THAT(
-      connect(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
-      SyscallSucceeds());
-
-  // Prepare and send an ICMP packet. Use arbitrary junk for checksum, sequence,
-  // and ID. None of that should matter for raw sockets - the kernel should
-  // still give us the packet.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.checksum = 2001;
-  icmp.un.echo.sequence = 2003;
-  icmp.un.echo.id = 2004;
-  ASSERT_THAT(send(s_, &icmp, sizeof(icmp), 0),
-              SyscallSucceedsWithValue(sizeof(icmp)));
-
-  ASSERT_NO_FATAL_FAILURE(ExpectICMPSuccess(icmp));
 }
 
 // Test that calling send() without connect() fails.
-TEST_F(RawSocketTest, SendWithoutConnectFails) {
+TEST_P(RawSocketTest, SendWithoutConnectFails) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
-  // Prepare and send an ICMP packet. Use arbitrary junk for checksum, sequence,
-  // and ID. None of that should matter for raw sockets - the kernel should
-  // still give us the packet.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.checksum = 2015;
-  icmp.un.echo.sequence = 2017;
-  icmp.un.echo.id = 2019;
-  ASSERT_THAT(send(s_, &icmp, sizeof(icmp), 0),
-              SyscallFailsWithErrno(ENOTCONN));
+  // Arbitrary.
+  constexpr char kBuf[] = "Endgame was good";
+  ASSERT_THAT(send(s_, kBuf, sizeof(kBuf), 0),
+              SyscallFailsWithErrno(EDESTADDRREQ));
 }
 
 // Bind to localhost.
-TEST_F(RawSocketTest, BindToLocalhost) {
+TEST_P(RawSocketTest, BindToLocalhost) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
@@ -403,7 +242,7 @@ TEST_F(RawSocketTest, BindToLocalhost) {
 }
 
 // Bind to a different address.
-TEST_F(RawSocketTest, BindToInvalid) {
+TEST_P(RawSocketTest, BindToInvalid) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   struct sockaddr_in bind_addr = {};
@@ -414,30 +253,86 @@ TEST_F(RawSocketTest, BindToInvalid) {
               SyscallFailsWithErrno(EADDRNOTAVAIL));
 }
 
+// Send and receive an packet.
+TEST_P(RawSocketTest, SendAndReceive) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  // Arbitrary.
+  constexpr char kBuf[] = "TB12";
+  ASSERT_NO_FATAL_FAILURE(SendBuf(kBuf, sizeof(kBuf)));
+
+  // Receive the packet and make sure it's identical.
+  char recv_buf[sizeof(kBuf) + sizeof(struct iphdr)];
+  ASSERT_NO_FATAL_FAILURE(ReceiveBuf(recv_buf, sizeof(recv_buf)));
+  EXPECT_EQ(memcmp(recv_buf + sizeof(struct iphdr), kBuf, sizeof(kBuf)), 0);
+}
+
+// We should be able to create multiple raw sockets for the same protocol and
+// receive the same packet on both.
+TEST_P(RawSocketTest, MultipleSocketReceive) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  int s2;
+  ASSERT_THAT(s2 = socket(AF_INET, SOCK_RAW, Protocol()), SyscallSucceeds());
+
+  // Arbitrary.
+  constexpr char kBuf[] = "TB10";
+  ASSERT_NO_FATAL_FAILURE(SendBuf(kBuf, sizeof(kBuf)));
+
+  // Receive it on socket 1.
+  char recv_buf1[sizeof(kBuf) + sizeof(struct iphdr)];
+  ASSERT_NO_FATAL_FAILURE(ReceiveBuf(recv_buf1, sizeof(recv_buf1)));
+
+  // Receive it on socket 2.
+  char recv_buf2[sizeof(kBuf) + sizeof(struct iphdr)];
+  ASSERT_NO_FATAL_FAILURE(RecvNoCmsg(s2, recv_buf2, sizeof(recv_buf2)));
+
+  EXPECT_EQ(memcmp(recv_buf1 + sizeof(struct iphdr),
+                   recv_buf2 + sizeof(struct iphdr), sizeof(kBuf)),
+            0);
+
+  ASSERT_THAT(close(s2), SyscallSucceeds());
+}
+
+// Test that connect sends packets to the right place.
+TEST_P(RawSocketTest, SendAndReceiveViaConnect) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
+
+  ASSERT_THAT(
+      connect(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
+      SyscallSucceeds());
+
+  // Arbitrary.
+  constexpr char kBuf[] = "JH4";
+  ASSERT_THAT(send(s_, kBuf, sizeof(kBuf), 0),
+              SyscallSucceedsWithValue(sizeof(kBuf)));
+
+  // Receive the packet and make sure it's identical.
+  char recv_buf[sizeof(kBuf) + sizeof(struct iphdr)];
+  ASSERT_NO_FATAL_FAILURE(ReceiveBuf(recv_buf, sizeof(recv_buf)));
+  EXPECT_EQ(memcmp(recv_buf + sizeof(struct iphdr), kBuf, sizeof(kBuf)), 0);
+}
+
 // Bind to localhost, then send and receive packets.
-TEST_F(RawSocketTest, BindSendAndReceive) {
+TEST_P(RawSocketTest, BindSendAndReceive) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
       bind(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
       SyscallSucceeds());
 
-  // Prepare and send an ICMP packet. Use arbitrary junk for checksum, sequence,
-  // and ID. None of that should matter for raw sockets - the kernel should
-  // still give us the packet.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.checksum = 2001;
-  icmp.un.echo.sequence = 2004;
-  icmp.un.echo.id = 2007;
-  ASSERT_NO_FATAL_FAILURE(SendEmptyICMP(icmp));
+  // Arbitrary.
+  constexpr char kBuf[] = "DR16";
+  ASSERT_NO_FATAL_FAILURE(SendBuf(kBuf, sizeof(kBuf)));
 
-  ASSERT_NO_FATAL_FAILURE(ExpectICMPSuccess(icmp));
+  // Receive the packet and make sure it's identical.
+  char recv_buf[sizeof(kBuf) + sizeof(struct iphdr)];
+  ASSERT_NO_FATAL_FAILURE(ReceiveBuf(recv_buf, sizeof(recv_buf)));
+  EXPECT_EQ(memcmp(recv_buf + sizeof(struct iphdr), kBuf, sizeof(kBuf)), 0);
 }
 
 // Bind and connect to localhost and send/receive packets.
-TEST_F(RawSocketTest, BindConnectSendAndReceive) {
+TEST_P(RawSocketTest, BindConnectSendAndReceive) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_RAW)));
 
   ASSERT_THAT(
@@ -447,109 +342,44 @@ TEST_F(RawSocketTest, BindConnectSendAndReceive) {
       connect(s_, reinterpret_cast<struct sockaddr*>(&addr_), sizeof(addr_)),
       SyscallSucceeds());
 
-  // Prepare and send an ICMP packet. Use arbitrary junk for checksum, sequence,
-  // and ID. None of that should matter for raw sockets - the kernel should
-  // still give us the packet.
-  struct icmphdr icmp;
-  icmp.type = ICMP_ECHO;
-  icmp.code = 0;
-  icmp.checksum = 2009;
-  icmp.un.echo.sequence = 2010;
-  icmp.un.echo.id = 7;
-  ASSERT_NO_FATAL_FAILURE(SendEmptyICMP(icmp));
+  // Arbitrary.
+  constexpr char kBuf[] = "DG88";
+  ASSERT_NO_FATAL_FAILURE(SendBuf(kBuf, sizeof(kBuf)));
 
-  ASSERT_NO_FATAL_FAILURE(ExpectICMPSuccess(icmp));
+  // Receive the packet and make sure it's identical.
+  char recv_buf[sizeof(kBuf) + sizeof(struct iphdr)];
+  ASSERT_NO_FATAL_FAILURE(ReceiveBuf(recv_buf, sizeof(recv_buf)));
+  EXPECT_EQ(memcmp(recv_buf + sizeof(struct iphdr), kBuf, sizeof(kBuf)), 0);
 }
 
-void RawSocketTest::ExpectICMPSuccess(const struct icmphdr& icmp) {
-  // We're going to receive both the echo request and reply, but the order is
-  // indeterminate.
-  char recv_buf[512];
-  struct sockaddr_in src;
-  bool received_request = false;
-  bool received_reply = false;
-
-  for (int i = 0; i < 2; i++) {
-    // Receive the packet.
-    ASSERT_NO_FATAL_FAILURE(ReceiveICMP(recv_buf, ABSL_ARRAYSIZE(recv_buf),
-                                        sizeof(struct icmphdr), &src));
-    EXPECT_EQ(memcmp(&src, &addr_, sizeof(sockaddr_in)), 0);
-    struct icmphdr* recvd_icmp =
-        reinterpret_cast<struct icmphdr*>(recv_buf + sizeof(struct iphdr));
-    switch (recvd_icmp->type) {
-      case ICMP_ECHO:
-        EXPECT_FALSE(received_request);
-        received_request = true;
-        // The packet should be identical to what we sent.
-        EXPECT_EQ(memcmp(recv_buf + sizeof(struct iphdr), &icmp, sizeof(icmp)),
-                  0);
-        break;
-
-      case ICMP_ECHOREPLY:
-        EXPECT_FALSE(received_reply);
-        received_reply = true;
-        // Most fields should be the same.
-        EXPECT_EQ(recvd_icmp->code, icmp.code);
-        EXPECT_EQ(recvd_icmp->un.echo.sequence, icmp.un.echo.sequence);
-        EXPECT_EQ(recvd_icmp->un.echo.id, icmp.un.echo.id);
-        // A couple are different.
-        EXPECT_EQ(recvd_icmp->type, ICMP_ECHOREPLY);
-        // The checksum is computed in such a way that it is guaranteed to have
-        // changed.
-        EXPECT_NE(recvd_icmp->checksum, icmp.checksum);
-        break;
-    }
-  }
-
-  ASSERT_TRUE(received_request);
-  ASSERT_TRUE(received_reply);
+void RawSocketTest::SendBuf(const char* buf, int buf_len) {
+  ASSERT_NO_FATAL_FAILURE(SendBufTo(s_, addr_, buf, buf_len));
 }
 
-void RawSocketTest::SendEmptyICMP(const struct icmphdr& icmp) {
-  ASSERT_NO_FATAL_FAILURE(SendEmptyICMPTo(s_, &addr_, icmp));
-}
-
-void RawSocketTest::SendEmptyICMPTo(int sock, struct sockaddr_in* addr,
-                                    const struct icmphdr& icmp) {
-  // It's safe to use const_cast here because sendmsg won't modify the iovec.
+void RawSocketTest::SendBufTo(int sock, const struct sockaddr_in& addr,
+                              const char* buf, int buf_len) {
+  // It's safe to use const_cast here because sendmsg won't modify the iovec or
+  // address.
   struct iovec iov = {};
-  iov.iov_base = static_cast<void*>(const_cast<struct icmphdr*>(&icmp));
-  iov.iov_len = sizeof(icmp);
+  iov.iov_base = static_cast<void*>(const_cast<char*>(buf));
+  iov.iov_len = static_cast<size_t>(buf_len);
   struct msghdr msg = {};
-  msg.msg_name = addr;
-  msg.msg_namelen = sizeof(*addr);
+  msg.msg_name = static_cast<void*>(const_cast<struct sockaddr_in*>(&addr));
+  msg.msg_namelen = sizeof(addr);
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
   msg.msg_control = NULL;
   msg.msg_controllen = 0;
   msg.msg_flags = 0;
-  ASSERT_THAT(sendmsg(sock, &msg, 0), SyscallSucceedsWithValue(sizeof(icmp)));
+  ASSERT_THAT(sendmsg(sock, &msg, 0), SyscallSucceedsWithValue(buf_len));
 }
 
-void RawSocketTest::ReceiveICMP(char* recv_buf, size_t recv_buf_len,
-                                size_t expected_size, struct sockaddr_in* src) {
-  ASSERT_NO_FATAL_FAILURE(
-      ReceiveICMPFrom(recv_buf, recv_buf_len, expected_size, src, s_));
+void RawSocketTest::ReceiveBuf(char* recv_buf, size_t recv_buf_len) {
+  ASSERT_NO_FATAL_FAILURE(RecvNoCmsg(s_, recv_buf, recv_buf_len));
 }
 
-void RawSocketTest::ReceiveICMPFrom(char* recv_buf, size_t recv_buf_len,
-                                    size_t expected_size,
-                                    struct sockaddr_in* src, int sock) {
-  struct iovec iov = {};
-  iov.iov_base = recv_buf;
-  iov.iov_len = recv_buf_len;
-  struct msghdr msg = {};
-  msg.msg_name = src;
-  msg.msg_namelen = sizeof(*src);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-  msg.msg_control = NULL;
-  msg.msg_controllen = 0;
-  msg.msg_flags = 0;
-  // We should receive the ICMP packet plus 20 bytes of IP header.
-  ASSERT_THAT(recvmsg(sock, &msg, 0),
-              SyscallSucceedsWithValue(expected_size + sizeof(struct iphdr)));
-}
+INSTANTIATE_TEST_SUITE_P(AllInetTests, RawSocketTest,
+                         ::testing::Values(IPPROTO_TCP, IPPROTO_UDP));
 
 }  // namespace
 

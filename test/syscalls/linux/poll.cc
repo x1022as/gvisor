@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+
 #include <algorithm>
+#include <iostream>
 
 #include "gtest/gtest.h"
 #include "absl/synchronization/notification.h"
@@ -255,7 +257,16 @@ TEST_F(PollTest, Nfds) {
   // Stash value of RLIMIT_NOFILES.
   struct rlimit rlim;
   TEST_PCHECK(getrlimit(RLIMIT_NOFILE, &rlim) == 0);
+
+  // gVisor caps the number of FDs that epoll can use beyond RLIMIT_NOFILE.
+  constexpr rlim_t gVisorMax = 1048576;
+  if (rlim.rlim_cur > gVisorMax) {
+    rlim.rlim_cur = gVisorMax;
+    TEST_PCHECK(setrlimit(RLIMIT_NOFILE, &rlim) == 0);
+  }
+
   rlim_t max_fds = rlim.rlim_cur;
+  std::cout << "Using limit: " << max_fds;
 
   // Create an eventfd. Since its value is initially zero, it is writable.
   FileDescriptor efd = ASSERT_NO_ERRNO_AND_VALUE(NewEventFD());

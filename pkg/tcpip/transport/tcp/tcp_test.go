@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -117,50 +117,6 @@ func TestActiveFailedConnectionAttemptIncrement(t *testing.T) {
 
 	if err := c.EP.Connect(tcpip.FullAddress{NIC: 2, Addr: context.TestAddr, Port: context.TestPort}); err != tcpip.ErrNoRoute {
 		t.Errorf("got c.EP.Connect(...) = %v, want = %v", err, tcpip.ErrNoRoute)
-	}
-
-	if got := stats.TCP.FailedConnectionAttempts.Value(); got != want {
-		t.Errorf("got stats.TCP.FailedConnectionAttempts.Value() = %v, want = %v", got, want)
-	}
-}
-
-func TestPassiveConnectionAttemptIncrement(t *testing.T) {
-	c := context.New(t, defaultMTU)
-	defer c.Cleanup()
-
-	stats := c.Stack().Stats()
-	want := stats.TCP.PassiveConnectionOpenings.Value() + 1
-	ep, err := c.Stack().NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &c.WQ)
-	if err != nil {
-		t.Fatalf("NewEndpoint failed: %v", err)
-	}
-
-	if err := ep.Bind(tcpip.FullAddress{Addr: context.StackAddr, Port: context.StackPort}); err != nil {
-		t.Fatalf("Bind failed: %v", err)
-	}
-	if err := ep.Listen(1); err != nil {
-		t.Fatalf("Listen failed: %v", err)
-	}
-
-	if got := stats.TCP.PassiveConnectionOpenings.Value(); got != want {
-		t.Errorf("got stats.TCP.PassiveConnectionOpenings.Value() = %v, want = %v", got, want)
-	}
-}
-
-func TestPassiveFailedConnectionAttemptIncrement(t *testing.T) {
-	c := context.New(t, defaultMTU)
-	defer c.Cleanup()
-
-	stats := c.Stack().Stats()
-	ep, err := c.Stack().NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &c.WQ)
-	if err != nil {
-		t.Fatalf("NewEndpoint failed: %v", err)
-	}
-	c.EP = ep
-	want := stats.TCP.FailedConnectionAttempts.Value() + 1
-
-	if err := ep.Listen(1); err != tcpip.ErrInvalidEndpointState {
-		t.Errorf("got ep.Listen(1) = %v, want = %v", err, tcpip.ErrInvalidEndpointState)
 	}
 
 	if got := stats.TCP.FailedConnectionAttempts.Value(); got != want {
@@ -685,6 +641,25 @@ func TestRstOnCloseWithUnreadDataFinConvertRst(t *testing.T) {
 		AckNum:  c.IRS.Add(seqnum.Size(2)),
 		RcvWnd:  30000,
 	})
+}
+
+func TestShutdownRead(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	c.CreateConnected(789, 30000, nil)
+
+	if _, _, err := c.EP.Read(nil); err != tcpip.ErrWouldBlock {
+		t.Fatalf("got c.EP.Read(nil) = %v, want = %v", err, tcpip.ErrWouldBlock)
+	}
+
+	if err := c.EP.Shutdown(tcpip.ShutdownRead); err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+
+	if _, _, err := c.EP.Read(nil); err != tcpip.ErrClosedForReceive {
+		t.Fatalf("got c.EP.Read(nil) = %v, want = %v", err, tcpip.ErrClosedForReceive)
+	}
 }
 
 func TestFullWindowReceive(t *testing.T) {
@@ -1773,12 +1748,12 @@ func TestSynOptionsOnActiveConnect(t *testing.T) {
 
 	// Receive SYN packet.
 	b := c.GetPacket()
-
+	mss := uint16(mtu - header.IPv4MinimumSize - header.TCPMinimumSize)
 	checker.IPv4(t, b,
 		checker.TCP(
 			checker.DstPort(context.TestPort),
 			checker.TCPFlags(header.TCPFlagSyn),
-			checker.TCPSynOptions(header.TCPSynOptions{MSS: mtu - header.IPv4MinimumSize - header.TCPMinimumSize, WS: wndScale}),
+			checker.TCPSynOptions(header.TCPSynOptions{MSS: mss, WS: wndScale}),
 		),
 	)
 
@@ -1793,7 +1768,7 @@ func TestSynOptionsOnActiveConnect(t *testing.T) {
 			checker.TCPFlags(header.TCPFlagSyn),
 			checker.SrcPort(tcp.SourcePort()),
 			checker.SeqNum(tcp.SequenceNumber()),
-			checker.TCPSynOptions(header.TCPSynOptions{MSS: mtu - header.IPv4MinimumSize - header.TCPMinimumSize, WS: wndScale}),
+			checker.TCPSynOptions(header.TCPSynOptions{MSS: mss, WS: wndScale}),
 		),
 	)
 
@@ -2361,490 +2336,6 @@ func TestFinWithPartialAck(t *testing.T) {
 	})
 }
 
-func TestExponentialIncreaseDuringSlowStart(t *testing.T) {
-	maxPayload := 10
-	c := context.New(t, uint32(header.TCPMinimumSize+header.IPv4MinimumSize+maxPayload))
-	defer c.Cleanup()
-
-	c.CreateConnected(789, 30000, nil)
-
-	const iterations = 7
-	data := buffer.NewView(maxPayload * (tcp.InitialCwnd << (iterations + 1)))
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	// Write all the data in one shot. Packets will only be written at the
-	// MTU size though.
-	if _, _, err := c.EP.Write(tcpip.SlicePayload(data), tcpip.WriteOptions{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-
-	expected := tcp.InitialCwnd
-	bytesRead := 0
-	for i := 0; i < iterations; i++ {
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd.", 50*time.Millisecond)
-
-		// Acknowledge all the data received so far.
-		c.SendAck(790, bytesRead)
-
-		// Double the number of expected packets for the next iteration.
-		expected *= 2
-	}
-}
-
-func TestCongestionAvoidance(t *testing.T) {
-	maxPayload := 10
-	c := context.New(t, uint32(header.TCPMinimumSize+header.IPv4MinimumSize+maxPayload))
-	defer c.Cleanup()
-
-	c.CreateConnected(789, 30000, nil)
-
-	const iterations = 7
-	data := buffer.NewView(2 * maxPayload * (tcp.InitialCwnd << (iterations + 1)))
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	// Write all the data in one shot. Packets will only be written at the
-	// MTU size though.
-	if _, _, err := c.EP.Write(tcpip.SlicePayload(data), tcpip.WriteOptions{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-
-	// Do slow start for a few iterations.
-	expected := tcp.InitialCwnd
-	bytesRead := 0
-	for i := 0; i < iterations; i++ {
-		expected = tcp.InitialCwnd << uint(i)
-		if i > 0 {
-			// Acknowledge all the data received so far if not on
-			// first iteration.
-			c.SendAck(790, bytesRead)
-		}
-
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd (slow start phase).", 50*time.Millisecond)
-	}
-
-	// Don't acknowledge the first packet of the last packet train. Let's
-	// wait for them to time out, which will trigger a restart of slow
-	// start, and initialization of ssthresh to cwnd/2.
-	rtxOffset := bytesRead - maxPayload*expected
-	c.ReceiveAndCheckPacket(data, rtxOffset, maxPayload)
-
-	// Acknowledge all the data received so far.
-	c.SendAck(790, bytesRead)
-
-	// This part is tricky: when the timeout happened, we had "expected"
-	// packets pending, cwnd reset to 1, and ssthresh set to expected/2.
-	// By acknowledging "expected" packets, the slow-start part will
-	// increase cwnd to expected/2 (which "consumes" expected/2-1 of the
-	// acknowledgements), then the congestion avoidance part will consume
-	// an extra expected/2 acks to take cwnd to expected/2 + 1. One ack
-	// remains in the "ack count" (which will cause cwnd to be incremented
-	// once it reaches cwnd acks).
-	//
-	// So we're straight into congestion avoidance with cwnd set to
-	// expected/2 + 1.
-	//
-	// Check that packets trains of cwnd packets are sent, and that cwnd is
-	// incremented by 1 after we acknowledge each packet.
-	expected = expected/2 + 1
-	for i := 0; i < iterations; i++ {
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd (congestion avoidance phase).", 50*time.Millisecond)
-
-		// Acknowledge all the data received so far.
-		c.SendAck(790, bytesRead)
-
-		// In cogestion avoidance, the packets trains increase by 1 in
-		// each iteration.
-		expected++
-	}
-}
-
-// cubicCwnd returns an estimate of a cubic window given the
-// originalCwnd, wMax, last congestion event time and sRTT.
-func cubicCwnd(origCwnd int, wMax int, congEventTime time.Time, sRTT time.Duration) int {
-	cwnd := float64(origCwnd)
-	// We wait 50ms between each iteration so sRTT as computed by cubic
-	// should be close to 50ms.
-	elapsed := (time.Since(congEventTime) + sRTT).Seconds()
-	k := math.Cbrt(float64(wMax) * 0.3 / 0.7)
-	wtRTT := 0.4*math.Pow(elapsed-k, 3) + float64(wMax)
-	cwnd += (wtRTT - cwnd) / cwnd
-	return int(cwnd)
-}
-
-func TestCubicCongestionAvoidance(t *testing.T) {
-	maxPayload := 10
-	c := context.New(t, uint32(header.TCPMinimumSize+header.IPv4MinimumSize+maxPayload))
-	defer c.Cleanup()
-
-	enableCUBIC(t, c)
-
-	c.CreateConnected(789, 30000, nil)
-
-	const iterations = 7
-	data := buffer.NewView(2 * maxPayload * (tcp.InitialCwnd << (iterations + 1)))
-
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	// Write all the data in one shot. Packets will only be written at the
-	// MTU size though.
-	if _, _, err := c.EP.Write(tcpip.SlicePayload(data), tcpip.WriteOptions{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-
-	// Do slow start for a few iterations.
-	expected := tcp.InitialCwnd
-	bytesRead := 0
-	for i := 0; i < iterations; i++ {
-		expected = tcp.InitialCwnd << uint(i)
-		if i > 0 {
-			// Acknowledge all the data received so far if not on
-			// first iteration.
-			c.SendAck(790, bytesRead)
-		}
-
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd (during slow-start phase).", 50*time.Millisecond)
-	}
-
-	// Don't acknowledge the first packet of the last packet train. Let's
-	// wait for them to time out, which will trigger a restart of slow
-	// start, and initialization of ssthresh to cwnd * 0.7.
-	rtxOffset := bytesRead - maxPayload*expected
-	c.ReceiveAndCheckPacket(data, rtxOffset, maxPayload)
-
-	// Acknowledge all pending data.
-	c.SendAck(790, bytesRead)
-
-	// Store away the time we sent the ACK and assuming a 200ms RTO
-	// we estimate that the sender will have an RTO 200ms from now
-	// and go back into slow start.
-	packetDropTime := time.Now().Add(200 * time.Millisecond)
-
-	// This part is tricky: when the timeout happened, we had "expected"
-	// packets pending, cwnd reset to 1, and ssthresh set to expected * 0.7.
-	// By acknowledging "expected" packets, the slow-start part will
-	// increase cwnd to expected/2 essentially putting the connection
-	// straight into congestion avoidance.
-	wMax := expected
-	// Lower expected as per cubic spec after a congestion event.
-	expected = int(float64(expected) * 0.7)
-	cwnd := expected
-	for i := 0; i < iterations; i++ {
-		// Cubic grows window independent of ACKs. Cubic Window growth
-		// is a function of time elapsed since last congestion event.
-		// As a result the congestion window does not grow
-		// deterministically in response to ACKs.
-		//
-		// We need to roughly estimate what the cwnd of the sender is
-		// based on when we sent the dupacks.
-		cwnd := cubicCwnd(cwnd, wMax, packetDropTime, 50*time.Millisecond)
-
-		packetsExpected := cwnd
-		for j := 0; j < packetsExpected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-		t.Logf("expected packets received, next trying to receive any extra packets that may come")
-
-		// If our estimate was correct there should be no more pending packets.
-		// We attempt to read a packet a few times with a short sleep in between
-		// to ensure that we don't see the sender send any unexpected packets.
-		unexpectedPackets := 0
-		for {
-			gotPacket := c.ReceiveNonBlockingAndCheckPacket(data, bytesRead, maxPayload)
-			if !gotPacket {
-				break
-			}
-			bytesRead += maxPayload
-			unexpectedPackets++
-			time.Sleep(1 * time.Millisecond)
-		}
-		if unexpectedPackets != 0 {
-			t.Fatalf("received %d unexpected packets for iteration %d", unexpectedPackets, i)
-		}
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd(congestion avoidance)", 5*time.Millisecond)
-
-		// Acknowledge all the data received so far.
-		c.SendAck(790, bytesRead)
-	}
-}
-
-func TestFastRecovery(t *testing.T) {
-	maxPayload := 10
-	c := context.New(t, uint32(header.TCPMinimumSize+header.IPv4MinimumSize+maxPayload))
-	defer c.Cleanup()
-
-	c.CreateConnected(789, 30000, nil)
-
-	const iterations = 7
-	data := buffer.NewView(2 * maxPayload * (tcp.InitialCwnd << (iterations + 1)))
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	// Write all the data in one shot. Packets will only be written at the
-	// MTU size though.
-	if _, _, err := c.EP.Write(tcpip.SlicePayload(data), tcpip.WriteOptions{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-
-	// Do slow start for a few iterations.
-	expected := tcp.InitialCwnd
-	bytesRead := 0
-	for i := 0; i < iterations; i++ {
-		expected = tcp.InitialCwnd << uint(i)
-		if i > 0 {
-			// Acknowledge all the data received so far if not on
-			// first iteration.
-			c.SendAck(790, bytesRead)
-		}
-
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd.", 50*time.Millisecond)
-	}
-
-	// Send 3 duplicate acks. This should force an immediate retransmit of
-	// the pending packet and put the sender into fast recovery.
-	rtxOffset := bytesRead - maxPayload*expected
-	for i := 0; i < 3; i++ {
-		c.SendAck(790, rtxOffset)
-	}
-
-	// Receive the retransmitted packet.
-	c.ReceiveAndCheckPacket(data, rtxOffset, maxPayload)
-
-	if got, want := c.Stack().Stats().TCP.FastRetransmit.Value(), uint64(1); got != want {
-		t.Errorf("got stats.TCP.FastRetransmit.Value = %v, want = %v", got, want)
-	}
-
-	if got, want := c.Stack().Stats().TCP.Retransmits.Value(), uint64(1); got != want {
-		t.Errorf("got stats.TCP.Retransmit.Value = %v, want = %v", got, want)
-	}
-
-	if got, want := c.Stack().Stats().TCP.FastRecovery.Value(), uint64(1); got != want {
-		t.Errorf("got stats.TCP.FastRecovery.Value = %v, want = %v", got, want)
-	}
-
-	// Now send 7 mode duplicate acks. Each of these should cause a window
-	// inflation by 1 and cause the sender to send an extra packet.
-	for i := 0; i < 7; i++ {
-		c.SendAck(790, rtxOffset)
-	}
-
-	recover := bytesRead
-
-	// Ensure no new packets arrive.
-	c.CheckNoPacketTimeout("More packets received than expected during recovery after dupacks for this cwnd.",
-		50*time.Millisecond)
-
-	// Acknowledge half of the pending data.
-	rtxOffset = bytesRead - expected*maxPayload/2
-	c.SendAck(790, rtxOffset)
-
-	// Receive the retransmit due to partial ack.
-	c.ReceiveAndCheckPacket(data, rtxOffset, maxPayload)
-
-	if got, want := c.Stack().Stats().TCP.FastRetransmit.Value(), uint64(2); got != want {
-		t.Errorf("got stats.TCP.FastRetransmit.Value = %v, want = %v", got, want)
-	}
-
-	if got, want := c.Stack().Stats().TCP.Retransmits.Value(), uint64(2); got != want {
-		t.Errorf("got stats.TCP.Retransmit.Value = %v, want = %v", got, want)
-	}
-
-	// Receive the 10 extra packets that should have been released due to
-	// the congestion window inflation in recovery.
-	for i := 0; i < 10; i++ {
-		c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-		bytesRead += maxPayload
-	}
-
-	// A partial ACK during recovery should reduce congestion window by the
-	// number acked. Since we had "expected" packets outstanding before sending
-	// partial ack and we acked expected/2 , the cwnd and outstanding should
-	// be expected/2 + 7. Which means the sender should not send any more packets
-	// till we ack this one.
-	c.CheckNoPacketTimeout("More packets received than expected during recovery after partial ack for this cwnd.",
-		50*time.Millisecond)
-
-	// Acknowledge all pending data to recover point.
-	c.SendAck(790, recover)
-
-	// At this point, the cwnd should reset to expected/2 and there are 10
-	// packets outstanding.
-	//
-	// NOTE: Technically netstack is incorrect in that we adjust the cwnd on
-	// the same segment that takes us out of recovery. But because of that
-	// the actual cwnd at exit of recovery will be expected/2 + 1 as we
-	// acked a cwnd worth of packets which will increase the cwnd further by
-	// 1 in congestion avoidance.
-	//
-	// Now in the first iteration since there are 10 packets outstanding.
-	// We would expect to get expected/2 +1 - 10 packets. But subsequent
-	// iterations will send us expected/2 + 1 + 1 (per iteration).
-	expected = expected/2 + 1 - 10
-	for i := 0; i < iterations; i++ {
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout(fmt.Sprintf("More packets received(after deflation) than expected %d for this cwnd.", expected), 50*time.Millisecond)
-
-		// Acknowledge all the data received so far.
-		c.SendAck(790, bytesRead)
-
-		// In cogestion avoidance, the packets trains increase by 1 in
-		// each iteration.
-		if i == 0 {
-			// After the first iteration we expect to get the full
-			// congestion window worth of packets in every
-			// iteration.
-			expected += 10
-		}
-		expected++
-	}
-}
-
-func TestRetransmit(t *testing.T) {
-	maxPayload := 10
-	c := context.New(t, uint32(header.TCPMinimumSize+header.IPv4MinimumSize+maxPayload))
-	defer c.Cleanup()
-
-	c.CreateConnected(789, 30000, nil)
-
-	const iterations = 7
-	data := buffer.NewView(maxPayload * (tcp.InitialCwnd << (iterations + 1)))
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	// Write all the data in two shots. Packets will only be written at the
-	// MTU size though.
-	half := data[:len(data)/2]
-	if _, _, err := c.EP.Write(tcpip.SlicePayload(half), tcpip.WriteOptions{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-	half = data[len(data)/2:]
-	if _, _, err := c.EP.Write(tcpip.SlicePayload(half), tcpip.WriteOptions{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-
-	// Do slow start for a few iterations.
-	expected := tcp.InitialCwnd
-	bytesRead := 0
-	for i := 0; i < iterations; i++ {
-		expected = tcp.InitialCwnd << uint(i)
-		if i > 0 {
-			// Acknowledge all the data received so far if not on
-			// first iteration.
-			c.SendAck(790, bytesRead)
-		}
-
-		// Read all packets expected on this iteration. Don't
-		// acknowledge any of them just yet, so that we can measure the
-		// congestion window.
-		for j := 0; j < expected; j++ {
-			c.ReceiveAndCheckPacket(data, bytesRead, maxPayload)
-			bytesRead += maxPayload
-		}
-
-		// Check we don't receive any more packets on this iteration.
-		// The timeout can't be too high or we'll trigger a timeout.
-		c.CheckNoPacketTimeout("More packets received than expected for this cwnd.", 50*time.Millisecond)
-	}
-
-	// Wait for a timeout and retransmit.
-	rtxOffset := bytesRead - maxPayload*expected
-	c.ReceiveAndCheckPacket(data, rtxOffset, maxPayload)
-
-	if got, want := c.Stack().Stats().TCP.Timeouts.Value(), uint64(1); got != want {
-		t.Errorf("got stats.TCP.Timeouts.Value = %v, want = %v", got, want)
-	}
-
-	if got, want := c.Stack().Stats().TCP.Retransmits.Value(), uint64(1); got != want {
-		t.Errorf("got stats.TCP.Retransmit.Value = %v, want = %v", got, want)
-	}
-
-	if got, want := c.Stack().Stats().TCP.SlowStartRetransmits.Value(), uint64(1); got != want {
-		t.Errorf("got stats.TCP.SlowStartRetransmits.Value = %v, want = %v", got, want)
-	}
-
-	// Acknowledge half of the pending data.
-	rtxOffset = bytesRead - expected*maxPayload/2
-	c.SendAck(790, rtxOffset)
-
-	// Receive the remaining data, making sure that acknowledged data is not
-	// retransmitted.
-	for offset := rtxOffset; offset < len(data); offset += maxPayload {
-		c.ReceiveAndCheckPacket(data, offset, maxPayload)
-		c.SendAck(790, offset+maxPayload)
-	}
-
-	c.CheckNoPacketTimeout("More packets received than expected for this cwnd.", 50*time.Millisecond)
-}
-
 func TestUpdateListenBacklog(t *testing.T) {
 	c := context.New(t, defaultMTU)
 	defer c.Cleanup()
@@ -2963,13 +2454,38 @@ func TestReceivedInvalidSegmentCountIncrement(t *testing.T) {
 		RcvWnd:  30000,
 	})
 	tcpbuf := vv.First()[header.IPv4MinimumSize:]
-	// 12 is the TCP header data offset.
-	tcpbuf[12] = ((header.TCPMinimumSize - 1) / 4) << 4
+	tcpbuf[header.TCPDataOffset] = ((header.TCPMinimumSize - 1) / 4) << 4
 
 	c.SendSegment(vv)
 
 	if got := stats.TCP.InvalidSegmentsReceived.Value(); got != want {
 		t.Errorf("got stats.TCP.InvalidSegmentsReceived.Value() = %v, want = %v", got, want)
+	}
+}
+
+func TestReceivedIncorrectChecksumIncrement(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+	c.CreateConnected(789, 30000, nil)
+	stats := c.Stack().Stats()
+	want := stats.TCP.ChecksumErrors.Value() + 1
+	vv := c.BuildSegment([]byte{0x1, 0x2, 0x3}, &context.Headers{
+		SrcPort: context.TestPort,
+		DstPort: c.Port,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  seqnum.Value(790),
+		AckNum:  c.IRS.Add(1),
+		RcvWnd:  30000,
+	})
+	tcpbuf := vv.First()[header.IPv4MinimumSize:]
+	// Overwrite a byte in the payload which should cause checksum
+	// verification to fail.
+	tcpbuf[(tcpbuf[header.TCPDataOffset]>>4)*4] = 0x4
+
+	c.SendSegment(vv)
+
+	if got := stats.TCP.ChecksumErrors.Value(); got != want {
+		t.Errorf("got stats.TCP.ChecksumErrors.Value() = %d, want = %d", got, want)
 	}
 }
 
@@ -3853,5 +3369,460 @@ func TestKeepalive(t *testing.T) {
 
 	if _, _, err := c.EP.Read(nil); err != tcpip.ErrConnectionReset {
 		t.Fatalf("got c.EP.Read(nil) = %v, want = %v", err, tcpip.ErrConnectionReset)
+	}
+}
+
+func executeHandshake(t *testing.T, c *context.Context, srcPort uint16, synCookieInUse bool) (irs, iss seqnum.Value) {
+	// Send a SYN request.
+	irs = seqnum.Value(789)
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: srcPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagSyn,
+		SeqNum:  irs,
+		RcvWnd:  30000,
+	})
+
+	// Receive the SYN-ACK reply.
+	b := c.GetPacket()
+	tcp := header.TCP(header.IPv4(b).Payload())
+	iss = seqnum.Value(tcp.SequenceNumber())
+	tcpCheckers := []checker.TransportChecker{
+		checker.SrcPort(context.StackPort),
+		checker.DstPort(srcPort),
+		checker.TCPFlags(header.TCPFlagAck | header.TCPFlagSyn),
+		checker.AckNum(uint32(irs) + 1),
+	}
+
+	if synCookieInUse {
+		// When cookies are in use window scaling is disabled.
+		tcpCheckers = append(tcpCheckers, checker.TCPSynOptions(header.TCPSynOptions{
+			WS:  -1,
+			MSS: c.MSSWithoutOptions(),
+		}))
+	}
+
+	checker.IPv4(t, b, checker.TCP(tcpCheckers...))
+
+	// Send ACK.
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: srcPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs + 1,
+		AckNum:  iss + 1,
+		RcvWnd:  30000,
+	})
+	return irs, iss
+}
+
+// TestListenBacklogFull tests that netstack does not complete handshakes if the
+// listen backlog for the endpoint is full.
+func TestListenBacklogFull(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	// Create TCP endpoint.
+	var err *tcpip.Error
+	c.EP, err = c.Stack().NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &c.WQ)
+	if err != nil {
+		t.Fatalf("NewEndpoint failed: %v", err)
+	}
+
+	// Bind to wildcard.
+	if err := c.EP.Bind(tcpip.FullAddress{Port: context.StackPort}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	// Test acceptance.
+	// Start listening.
+	listenBacklog := 2
+	if err := c.EP.Listen(listenBacklog); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	for i := 0; i < listenBacklog; i++ {
+		executeHandshake(t, c, context.TestPort+uint16(i), false /*synCookieInUse */)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Now execute one more handshake. This should not be completed and
+	// delivered on an Accept() call as the backlog is full at this point.
+	irs, iss := executeHandshake(t, c, context.TestPort+uint16(listenBacklog), false /* synCookieInUse */)
+
+	time.Sleep(50 * time.Millisecond)
+	// Try to accept the connection.
+	we, ch := waiter.NewChannelEntry(nil)
+	c.WQ.EventRegister(&we, waiter.EventIn)
+	defer c.WQ.EventUnregister(&we)
+
+	for i := 0; i < listenBacklog; i++ {
+		_, _, err = c.EP.Accept()
+		if err == tcpip.ErrWouldBlock {
+			// Wait for connection to be established.
+			select {
+			case <-ch:
+				_, _, err = c.EP.Accept()
+				if err != nil {
+					t.Fatalf("Accept failed: %v", err)
+				}
+
+			case <-time.After(1 * time.Second):
+				t.Fatalf("Timed out waiting for accept")
+			}
+		}
+	}
+
+	// Now verify that there are no more connections that can be accepted.
+	_, _, err = c.EP.Accept()
+	if err != tcpip.ErrWouldBlock {
+		select {
+		case <-ch:
+			t.Fatalf("unexpected endpoint delivered on Accept: %+v", c.EP)
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	// Now craft the ACK again and verify that the connection is now ready
+	// to be accepted.
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: context.TestPort + uint16(listenBacklog),
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs + 1,
+		AckNum:  iss + 1,
+		RcvWnd:  30000,
+	})
+
+	newEP, _, err := c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			newEP, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+	// Now verify that the TCP socket is usable and in a connected state.
+	data := "Don't panic"
+	newEP.Write(tcpip.SlicePayload(buffer.NewViewFromBytes([]byte(data))), tcpip.WriteOptions{})
+	b := c.GetPacket()
+	tcp := header.TCP(header.IPv4(b).Payload())
+	if string(tcp.Payload()) != data {
+		t.Fatalf("Unexpected data: got %v, want %v", string(tcp.Payload()), data)
+	}
+}
+
+func TestListenBacklogFullSynCookieInUse(t *testing.T) {
+	saved := tcp.SynRcvdCountThreshold
+	defer func() {
+		tcp.SynRcvdCountThreshold = saved
+	}()
+	tcp.SynRcvdCountThreshold = 1
+
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	// Create TCP endpoint.
+	var err *tcpip.Error
+	c.EP, err = c.Stack().NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &c.WQ)
+	if err != nil {
+		t.Fatalf("NewEndpoint failed: %v", err)
+	}
+
+	// Bind to wildcard.
+	if err := c.EP.Bind(tcpip.FullAddress{Port: context.StackPort}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	// Test acceptance.
+	// Start listening.
+	listenBacklog := 1
+	portOffset := uint16(0)
+	if err := c.EP.Listen(listenBacklog); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	executeHandshake(t, c, context.TestPort+portOffset, false)
+	portOffset++
+	// Wait for this to be delivered to the accept queue.
+	time.Sleep(50 * time.Millisecond)
+
+	nonCookieIRS, nonCookieISS := executeHandshake(t, c, context.TestPort+portOffset, false)
+
+	// Since the backlog is full at this point this connection will not
+	// transition out of handshake and ignore the ACK.
+	//
+	// At this point there should be 1 completed connection in the backlog
+	// and one incomplete one pending for a final ACK and hence not ready to be
+	// delivered to the endpoint.
+	//
+	// Now execute one more handshake. This should not be completed and
+	// delivered on an Accept() call as the backlog is full at this point
+	// and there is already 1 pending endpoint.
+	//
+	// This one should use a SYN cookie as the synRcvdCount is equal to the
+	// SynRcvdCountThreshold.
+	time.Sleep(50 * time.Millisecond)
+	portOffset++
+	irs, iss := executeHandshake(t, c, context.TestPort+portOffset, true)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify that there is only one acceptable connection at this point.
+	we, ch := waiter.NewChannelEntry(nil)
+	c.WQ.EventRegister(&we, waiter.EventIn)
+	defer c.WQ.EventUnregister(&we)
+
+	_, _, err = c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			_, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+
+	// Now verify that there are no more connections that can be accepted.
+	_, _, err = c.EP.Accept()
+	if err != tcpip.ErrWouldBlock {
+		select {
+		case <-ch:
+			t.Fatalf("unexpected endpoint delivered on Accept: %+v", c.EP)
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	// Now send an ACK for the half completed connection
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: context.TestPort + portOffset - 1,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  nonCookieIRS + 1,
+		AckNum:  nonCookieISS + 1,
+		RcvWnd:  30000,
+	})
+
+	// Verify that the connection is now delivered to the backlog.
+	_, _, err = c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			_, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+
+	// Finally send an ACK for the connection that used a cookie and verify that
+	// it's also completed and delivered.
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: context.TestPort + portOffset,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs,
+		AckNum:  iss,
+		RcvWnd:  30000,
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	newEP, _, err := c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			newEP, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+
+	// Now verify that the TCP socket is usable and in a connected state.
+	data := "Don't panic"
+	newEP.Write(tcpip.SlicePayload(buffer.NewViewFromBytes([]byte(data))), tcpip.WriteOptions{})
+	b := c.GetPacket()
+	tcp := header.TCP(header.IPv4(b).Payload())
+	if string(tcp.Payload()) != data {
+		t.Fatalf("Unexpected data: got %v, want %v", string(tcp.Payload()), data)
+	}
+}
+
+func TestPassiveConnectionAttemptIncrement(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	ep, err := c.Stack().NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &c.WQ)
+	if err != nil {
+		t.Fatalf("NewEndpoint failed: %v", err)
+	}
+	c.EP = ep
+	if err := ep.Bind(tcpip.FullAddress{Addr: context.StackAddr, Port: context.StackPort}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+	if err := c.EP.Listen(1); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	stats := c.Stack().Stats()
+	want := stats.TCP.PassiveConnectionOpenings.Value() + 1
+
+	srcPort := uint16(context.TestPort)
+	executeHandshake(t, c, srcPort+1, false)
+
+	we, ch := waiter.NewChannelEntry(nil)
+	c.WQ.EventRegister(&we, waiter.EventIn)
+	defer c.WQ.EventUnregister(&we)
+
+	// Verify that there is only one acceptable connection at this point.
+	_, _, err = c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			_, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+
+	if got := stats.TCP.PassiveConnectionOpenings.Value(); got != want {
+		t.Errorf("got stats.TCP.PassiveConnectionOpenings.Value() = %v, want = %v", got, want)
+	}
+}
+
+func TestPassiveFailedConnectionAttemptIncrement(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	stats := c.Stack().Stats()
+	ep, err := c.Stack().NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &c.WQ)
+	if err != nil {
+		t.Fatalf("NewEndpoint failed: %v", err)
+	}
+	c.EP = ep
+	if err := c.EP.Bind(tcpip.FullAddress{Addr: context.StackAddr, Port: context.StackPort}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+	if err := c.EP.Listen(1); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	srcPort := uint16(context.TestPort)
+	// Now attempt 3 handshakes, the first two will fill up the accept and the SYN-RCVD
+	// queue for the endpoint.
+	executeHandshake(t, c, srcPort, false)
+
+	// Give time for the final ACK to be processed as otherwise the next handshake could
+	// get accepted before the previous one based on goroutine scheduling.
+	time.Sleep(50 * time.Millisecond)
+	irs, iss := executeHandshake(t, c, srcPort+1, false)
+
+	// Wait for a short while for the accepted connection to be delivered to
+	// the channel before trying to send the 3rd SYN.
+	time.Sleep(40 * time.Millisecond)
+
+	want := stats.TCP.ListenOverflowSynDrop.Value() + 1
+
+	// Now we will send one more SYN and this one should get dropped
+	// Send a SYN request.
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: srcPort + 2,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagSyn,
+		SeqNum:  seqnum.Value(789),
+		RcvWnd:  30000,
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if got := stats.TCP.ListenOverflowSynDrop.Value(); got != want {
+		t.Errorf("got stats.TCP.ListenOverflowSynDrop.Value() = %v, want = %v", got, want)
+	}
+
+	we, ch := waiter.NewChannelEntry(nil)
+	c.WQ.EventRegister(&we, waiter.EventIn)
+	defer c.WQ.EventUnregister(&we)
+
+	// Now check that there is one acceptable connections.
+	_, _, err = c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			_, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+
+	// Now complete the next connection in SYN-RCVD state as it should
+	// have dropped the final ACK to the handshake due to accept queue
+	// being full.
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: srcPort + 1,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs + 1,
+		AckNum:  iss + 1,
+		RcvWnd:  30000,
+	})
+
+	// Now check that there is one more acceptable connections.
+	_, _, err = c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			_, _, err = c.EP.Accept()
+			if err != nil {
+				t.Fatalf("Accept failed: %v", err)
+			}
+
+		case <-time.After(1 * time.Second):
+			t.Fatalf("Timed out waiting for accept")
+		}
+	}
+
+	// Try and accept a 3rd one this should fail.
+	_, _, err = c.EP.Accept()
+	if err == tcpip.ErrWouldBlock {
+		// Wait for connection to be established.
+		select {
+		case <-ch:
+			ep, _, err = c.EP.Accept()
+			if err == nil {
+				t.Fatalf("Accept succeeded when it should have failed got: %+v", ep)
+			}
+
+		case <-time.After(1 * time.Second):
+		}
 	}
 }

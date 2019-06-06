@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -79,7 +79,7 @@ func (tp *threadPool) lookupOrCreate(currentTID int32, newThread func() *thread)
 		// Before creating a new thread, see if we can find a thread
 		// whose system tid has disappeared.
 		//
-		// TODO: Other parts of this package depend on
+		// TODO(b/77216482): Other parts of this package depend on
 		// threads never exiting.
 		for origTID, t := range tp.threads {
 			// Signal zero is an easy existence check.

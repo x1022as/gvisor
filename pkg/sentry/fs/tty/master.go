@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ func newMasterInode(ctx context.Context, d *dirInodeOperations, owner fs.FileOwn
 		// N.B. Linux always uses inode id 2 for ptmx. See
 		// fs/devpts/inode.c:mknod_ptmx.
 		//
-		// TODO: Since ptsDevice must be shared between
+		// TODO(b/75267214): Since ptsDevice must be shared between
 		// different mounts, we must not assign fixed numbers.
 		InodeID: ptsDevice.NextIno(),
 		Type:    fs.CharacterDevice,
@@ -95,11 +95,13 @@ func (mi *masterInodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flag
 //
 // +stateify savable
 type masterFileOperations struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	// d is the containing dir.
 	d *dirInodeOperations
@@ -156,7 +158,7 @@ func (mf *masterFileOperations) Ioctl(ctx context.Context, io usermem.IO, args a
 		// of the slave end.
 		return mf.t.ld.setTermios(ctx, io, args)
 	case linux.TCSETSW:
-		// TODO: This should drain the output queue first.
+		// TODO(b/29356795): This should drain the output queue first.
 		return mf.t.ld.setTermios(ctx, io, args)
 	case linux.TIOCGPTN:
 		_, err := usermem.CopyObjectOut(ctx, io, args[2].Pointer(), uint32(mf.t.n), usermem.IOOpts{
@@ -164,7 +166,7 @@ func (mf *masterFileOperations) Ioctl(ctx context.Context, io usermem.IO, args a
 		})
 		return 0, err
 	case linux.TIOCSPTLCK:
-		// TODO: Implement pty locking. For now just pretend we do.
+		// TODO(b/29356795): Implement pty locking. For now just pretend we do.
 		return 0, nil
 	case linux.TIOCGWINSZ:
 		return 0, mf.t.ld.windowSize(ctx, io, args)

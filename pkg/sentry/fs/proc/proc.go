@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,10 +43,15 @@ type proc struct {
 	// pidns is the PID namespace of the task that mounted the proc filesystem
 	// that this node represents.
 	pidns *kernel.PIDNamespace
+
+	// cgroupControllers is a map of controller name to directory in the
+	// cgroup hierarchy. These controllers are immutable and will be listed
+	// in /proc/pid/cgroup if not nil.
+	cgroupControllers map[string]string
 }
 
 // New returns the root node of a partial simple procfs.
-func New(ctx context.Context, msrc *fs.MountSource) (*fs.Inode, error) {
+func New(ctx context.Context, msrc *fs.MountSource, cgroupControllers map[string]string) (*fs.Inode, error) {
 	k := kernel.KernelFromContext(ctx)
 	if k == nil {
 		return nil, fmt.Errorf("procfs requires a kernel")
@@ -73,9 +78,10 @@ func New(ctx context.Context, msrc *fs.MountSource) (*fs.Inode, error) {
 
 	// Construct the proc InodeOperations.
 	p := &proc{
-		Dir:   *ramfs.NewDir(ctx, contents, fs.RootOwner, fs.FilePermsFromMode(0555)),
-		k:     k,
-		pidns: pidns,
+		Dir:               *ramfs.NewDir(ctx, contents, fs.RootOwner, fs.FilePermsFromMode(0555)),
+		k:                 k,
+		pidns:             pidns,
+		cgroupControllers: cgroupControllers,
 	}
 
 	// Add more contents that need proc to be initialized.
@@ -178,7 +184,7 @@ func (p *proc) Lookup(ctx context.Context, dir *fs.Inode, name string) (*fs.Dire
 	}
 
 	// Wrap it in a taskDir.
-	td := newTaskDir(otherTask, dir.MountSource, p.pidns, true)
+	td := p.newTaskDir(otherTask, dir.MountSource, true)
 	return fs.NewDirent(td, name), nil
 }
 
@@ -191,7 +197,8 @@ func (p *proc) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFlag
 //
 // +stateify savable
 type rootProcFile struct {
-	fsutil.DirFileOperations `state:"nosave"`
+	fsutil.DirFileOperations        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	iops *proc
 }
@@ -210,7 +217,9 @@ func (rpf *rootProcFile) Readdir(ctx context.Context, file *fs.File, ser fs.Dent
 
 	// Add dot and dotdot.
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 	dot, dotdot := file.Dirent.GetDotAttrs(root)
 	names = append(names, ".", "..")
 	m["."] = dot

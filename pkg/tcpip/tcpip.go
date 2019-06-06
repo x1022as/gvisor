@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -102,6 +102,7 @@ var (
 	ErrMessageTooLong        = &Error{msg: "message too long"}
 	ErrNoBufferSpace         = &Error{msg: "no buffer space available"}
 	ErrBroadcastDisabled     = &Error{msg: "broadcast socket option disabled"}
+	ErrNotPermitted          = &Error{msg: "operation not permitted"}
 )
 
 // Errors related to Subnet
@@ -124,7 +125,7 @@ func (e ErrSaveRejection) Error() string {
 // A Clock provides the current time.
 //
 // Times returned by a Clock should always be used for application-visible
-// time, but never for netstack internal timekeeping.
+// time. Only monotonic times should be used for netstack internal timekeeping.
 type Clock interface {
 	// NowNanoseconds returns the current real time as a number of
 	// nanoseconds since the Unix epoch.
@@ -443,7 +444,7 @@ type PasscredOption int
 
 // TCPInfoOption is used by GetSockOpt to expose TCP statistics.
 //
-// TODO: Add and populate stat fields.
+// TODO(b/64800844): Add and populate stat fields.
 type TCPInfoOption struct {
 	RTT    time.Duration
 	RTTVar time.Duration
@@ -759,6 +760,25 @@ type TCPStats struct {
 	// successfully via Listen.
 	PassiveConnectionOpenings *StatCounter
 
+	// ListenOverflowSynDrop is the number of times the listen queue overflowed
+	// and a SYN was dropped.
+	ListenOverflowSynDrop *StatCounter
+
+	// ListenOverflowAckDrop is the number of times the final ACK
+	// in the handshake was dropped due to overflow.
+	ListenOverflowAckDrop *StatCounter
+
+	// ListenOverflowCookieSent is the number of times a SYN cookie was sent.
+	ListenOverflowSynCookieSent *StatCounter
+
+	// ListenOverflowSynCookieRcvd is the number of times a valid SYN
+	// cookie was received.
+	ListenOverflowSynCookieRcvd *StatCounter
+
+	// ListenOverflowInvalidSynCookieRcvd is the number of times an invalid SYN cookie
+	// was received.
+	ListenOverflowInvalidSynCookieRcvd *StatCounter
+
 	// FailedConnectionAttempts is the number of calls to Connect or Listen
 	// (active and passive openings, respectively) that end in an error.
 	FailedConnectionAttempts *StatCounter
@@ -801,6 +821,9 @@ type TCPStats struct {
 
 	// Timeouts is the number of times the RTO expired.
 	Timeouts *StatCounter
+
+	// ChecksumErrors is the number of segments dropped due to bad checksums.
+	ChecksumErrors *StatCounter
 }
 
 // UDPStats collects UDP-specific stats.

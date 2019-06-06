@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -768,7 +768,7 @@ func (t *Tmknod) do(cs *connState, uid UID) (*Rmknod, error) {
 		}
 
 		// Do the mknod.
-		qid, err = ref.file.Mknod(t.Name, t.Permissions, t.Major, t.Minor, uid, t.GID)
+		qid, err = ref.file.Mknod(t.Name, t.Mode, t.Major, t.Minor, uid, t.GID)
 		return err
 	}); err != nil {
 		return nil, err
@@ -875,6 +875,40 @@ func (t *Tsetattr) handle(cs *connState) message {
 	}
 
 	return &Rsetattr{}
+}
+
+// handle implements handler.handle.
+func (t *Tallocate) handle(cs *connState) message {
+	// Lookup the FID.
+	ref, ok := cs.LookupFID(t.FID)
+	if !ok {
+		return newErr(syscall.EBADF)
+	}
+	defer ref.DecRef()
+
+	if err := ref.safelyWrite(func() error {
+		// Has it been opened already?
+		openFlags, opened := ref.OpenFlags()
+		if !opened {
+			return syscall.EINVAL
+		}
+
+		// Can it be written? Check permissions.
+		if openFlags&OpenFlagsModeMask == ReadOnly {
+			return syscall.EBADF
+		}
+
+		// We don't allow allocate on files that have been deleted.
+		if ref.isDeleted() {
+			return syscall.EINVAL
+		}
+
+		return ref.file.Allocate(t.Mode, t.Offset, t.Length)
+	}); err != nil {
+		return newErr(err)
+	}
+
+	return &Rallocate{}
 }
 
 // handle implements handler.handle.

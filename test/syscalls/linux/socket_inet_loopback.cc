@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 
 #include <atomic>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -143,7 +144,7 @@ TEST_P(SocketInetLoopbackTest, TCP) {
   ASSERT_THAT(shutdown(conn_fd.get(), SHUT_RDWR), SyscallSucceeds());
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     All, SocketInetLoopbackTest,
     ::testing::Values(
         // Listeners bound to IPv4 addresses refuse connections using IPv6
@@ -220,7 +221,7 @@ TEST_P(SocketInetReusePortTest, TcpPortReuseMultiThread) {
   std::atomic<int> connects_received = ATOMIC_VAR_INIT(0);
   std::unique_ptr<ScopedThread> listen_thread[kThreadCount];
   int accept_counts[kThreadCount] = {};
-  // TODO: figure how to not disable S/R for the whole test.
+  // TODO(avagin): figure how to not disable S/R for the whole test.
   // We need to take into account that this test executes a lot of system
   // calls from many threads.
   DisableSave ds;
@@ -324,7 +325,7 @@ TEST_P(SocketInetReusePortTest, UdpPortReuseMultiThread) {
   std::atomic<int> packets_received = ATOMIC_VAR_INIT(0);
   std::unique_ptr<ScopedThread> receiver_thread[kThreadCount];
   int packets_per_socket[kThreadCount] = {};
-  // TODO: figure how to not disable S/R for the whole test.
+  // TODO(avagin): figure how to not disable S/R for the whole test.
   DisableSave ds;  // Too expensive.
 
   for (int i = 0; i < kThreadCount; i++) {
@@ -393,7 +394,7 @@ TEST_P(SocketInetReusePortTest, UdpPortReuseMultiThread) {
                 EquivalentWithin((kConnectAttempts / kThreadCount), 0.10));
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     All, SocketInetReusePortTest,
     ::testing::Values(
         // Listeners bound to IPv4 addresses refuse connections using IPv6
@@ -641,7 +642,7 @@ TEST_P(SocketMultiProtocolInetLoopbackTest, V6OnlyV6AnyReservesV6) {
 TEST_P(SocketMultiProtocolInetLoopbackTest, V6EphemeralPortReserved) {
   auto const& param = GetParam();
 
-  // FIXME
+  // FIXME(b/114268588)
   SKIP_IF(IsRunningOnGvisor() && param.type == SOCK_STREAM);
 
   for (int i = 0; true; i++) {
@@ -742,7 +743,7 @@ TEST_P(SocketMultiProtocolInetLoopbackTest, V6EphemeralPortReserved) {
 TEST_P(SocketMultiProtocolInetLoopbackTest, V4MappedEphemeralPortReserved) {
   auto const& param = GetParam();
 
-  // FIXME
+  // FIXME(b/114268588)
   SKIP_IF(IsRunningOnGvisor() && param.type == SOCK_STREAM);
 
   for (int i = 0; true; i++) {
@@ -866,7 +867,7 @@ TEST_P(SocketMultiProtocolInetLoopbackTest, V4MappedEphemeralPortReserved) {
 TEST_P(SocketMultiProtocolInetLoopbackTest, V4EphemeralPortReserved) {
   auto const& param = GetParam();
 
-  // FIXME
+  // FIXME(b/114268588)
   SKIP_IF(IsRunningOnGvisor() && param.type == SOCK_STREAM);
 
   for (int i = 0; true; i++) {
@@ -1025,7 +1026,7 @@ TEST_P(SocketMultiProtocolInetLoopbackTest, PortReuseTwoSockets) {
           setsockopt(fd2, SOL_SOCKET, SO_REUSEPORT, &portreuse2, sizeof(int)),
           SyscallSucceeds());
 
-      LOG(INFO) << portreuse1 << " " << portreuse2;
+      std::cout << portreuse1 << " " << portreuse2;
       int ret = bind(fd2, reinterpret_cast<sockaddr*>(&addr), addrlen);
 
       // Verify that two sockets can be bound to the same port only if
@@ -1039,10 +1040,45 @@ TEST_P(SocketMultiProtocolInetLoopbackTest, PortReuseTwoSockets) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(AllFamlies, SocketMultiProtocolInetLoopbackTest,
-                        ::testing::Values(ProtocolTestParam{"TCP", SOCK_STREAM},
-                                          ProtocolTestParam{"UDP", SOCK_DGRAM}),
-                        DescribeProtocolTestParam);
+// Check that when a socket was bound to an address with REUSEPORT and then
+// closed, we can bind a different socket to the same address without needing
+// REUSEPORT.
+TEST_P(SocketMultiProtocolInetLoopbackTest, NoReusePortFollowingReusePort) {
+  auto const& param = GetParam();
+  TestAddress const& test_addr = V4Loopback();
+  sockaddr_storage addr = test_addr.addr;
+
+  auto s = ASSERT_NO_ERRNO_AND_VALUE(Socket(test_addr.family(), param.type, 0));
+  int fd = s.get();
+  socklen_t addrlen = test_addr.addr_len;
+  int portreuse = 1;
+  ASSERT_THAT(
+      setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &portreuse, sizeof(portreuse)),
+      SyscallSucceeds());
+  ASSERT_THAT(bind(fd, reinterpret_cast<sockaddr*>(&addr), addrlen),
+              SyscallSucceeds());
+  ASSERT_THAT(getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen),
+              SyscallSucceeds());
+  ASSERT_EQ(addrlen, test_addr.addr_len);
+
+  s.reset();
+
+  // Open a new socket and bind to the same address, but w/o REUSEPORT.
+  s = ASSERT_NO_ERRNO_AND_VALUE(Socket(test_addr.family(), param.type, 0));
+  fd = s.get();
+  portreuse = 0;
+  ASSERT_THAT(
+      setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &portreuse, sizeof(portreuse)),
+      SyscallSucceeds());
+  ASSERT_THAT(bind(fd, reinterpret_cast<sockaddr*>(&addr), addrlen),
+              SyscallSucceeds());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllFamlies, SocketMultiProtocolInetLoopbackTest,
+    ::testing::Values(ProtocolTestParam{"TCP", SOCK_STREAM},
+                      ProtocolTestParam{"UDP", SOCK_DGRAM}),
+    DescribeProtocolTestParam);
 
 }  // namespace
 

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -149,7 +149,7 @@ func (f *fileInodeOperations) Mappable(*fs.Inode) memmap.Mappable {
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (*fileInodeOperations) Rename(ctx context.Context, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
+func (*fileInodeOperations) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return rename(ctx, oldParent, oldName, newParent, newName, replacement)
 }
 
@@ -259,6 +259,33 @@ func (f *fileInodeOperations) Truncate(ctx context.Context, _ *fs.Inode, size in
 	return nil
 }
 
+// Allocate implements fs.InodeOperations.Allocate.
+func (f *fileInodeOperations) Allocate(ctx context.Context, _ *fs.Inode, offset, length int64) error {
+	newSize := offset + length
+
+	f.attrMu.Lock()
+	defer f.attrMu.Unlock()
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
+
+	if newSize <= f.attr.Size {
+		return nil
+	}
+
+	// Check if current seals allow growth.
+	if f.seals&linux.F_SEAL_GROW != 0 {
+		return syserror.EPERM
+	}
+
+	f.attr.Size = newSize
+
+	now := ktime.NowFromContext(ctx)
+	f.attr.ModificationTime = now
+	f.attr.StatusChangeTime = now
+
+	return nil
+}
+
 // AddLink implements fs.InodeOperations.AddLink.
 func (f *fileInodeOperations) AddLink() {
 	f.attrMu.Lock()
@@ -309,7 +336,7 @@ func (f *fileInodeOperations) read(ctx context.Context, file *fs.File, dst userm
 	// common: getting a return value of 0 from a read syscall is the only way
 	// to detect EOF.
 	//
-	// TODO: Separate out f.attr.Size and use atomics instead of
+	// TODO(jamieliu): Separate out f.attr.Size and use atomics instead of
 	// f.dataMu.
 	f.dataMu.RLock()
 	size := f.attr.Size

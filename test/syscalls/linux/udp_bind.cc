@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -175,7 +175,7 @@ socklen_t Ipv4MappedIpv6Addr(sockaddr_storage* addr, int port = 0) {
   return sizeof(struct sockaddr_in6);
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     UdpBindTest, SendtoTest,
     ::testing::Values(
         []() {
@@ -286,7 +286,7 @@ INSTANTIATE_TEST_CASE_P(
         []() {
           SendtoTestParam param = {};
           param.description = "connected IPv6 sendto IPv4 mapped IPv6";
-          // TODO: Determine if this inconsistent behavior is worth
+          // TODO(igudger): Determine if this inconsistent behavior is worth
           // implementing.
           param.skip_on_gvisor = true;
           param.send_domain = AF_INET6;
@@ -299,7 +299,7 @@ INSTANTIATE_TEST_CASE_P(
         []() {
           SendtoTestParam param = {};
           param.description = "connected IPv6 sendto IPv4";
-          // TODO: Determine if this inconsistent behavior is worth
+          // TODO(igudger): Determine if this inconsistent behavior is worth
           // implementing.
           param.skip_on_gvisor = true;
           param.send_domain = AF_INET6;

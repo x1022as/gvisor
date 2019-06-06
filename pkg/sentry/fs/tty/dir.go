@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -53,20 +53,21 @@ import (
 // +stateify savable
 type dirInodeOperations struct {
 	fsutil.InodeGenericChecker       `state:"nosave"`
+	fsutil.InodeIsDirAllocate        `state:"nosave"`
+	fsutil.InodeIsDirTruncate        `state:"nosave"`
 	fsutil.InodeNoExtendedAttributes `state:"nosave"`
 	fsutil.InodeNoopWriteOut         `state:"nosave"`
 	fsutil.InodeNotMappable          `state:"nosave"`
 	fsutil.InodeNotRenameable        `state:"nosave"`
-	fsutil.InodeNotSymlink           `state:"nosave"`
 	fsutil.InodeNotSocket            `state:"nosave"`
-	fsutil.InodeNotTruncatable       `state:"nosave"`
+	fsutil.InodeNotSymlink           `state:"nosave"`
 	fsutil.InodeVirtual              `state:"nosave"`
 
 	fsutil.InodeSimpleAttributes
 
 	// msrc is the super block this directory is on.
 	//
-	// TODO: Plumb this through instead of storing it here.
+	// TODO(chrisko): Plumb this through instead of storing it here.
 	msrc *fs.MountSource
 
 	// mu protects the fields below.
@@ -89,7 +90,7 @@ type dirInodeOperations struct {
 
 	// next is the next pty index to use.
 	//
-	// TODO: reuse indices when ptys are closed.
+	// TODO(b/29356795): reuse indices when ptys are closed.
 	next uint32
 }
 
@@ -118,7 +119,7 @@ func newDir(ctx context.Context, m *fs.MountSource) *fs.Inode {
 		// N.B. Linux always uses inode id 1 for the directory. See
 		// fs/devpts/inode.c:devpts_fill_super.
 		//
-		// TODO: Since ptsDevice must be shared between
+		// TODO(b/75267214): Since ptsDevice must be shared between
 		// different mounts, we must not assign fixed numbers.
 		InodeID:   ptsDevice.NextIno(),
 		BlockSize: usermem.PageSize,
@@ -285,13 +286,15 @@ func (d *dirInodeOperations) masterClose(t *Terminal) {
 //
 // +stateify savable
 type dirFileOperations struct {
-	waiter.AlwaysReady     `state:"nosave"`
-	fsutil.FileNoopRelease `state:"nosave"`
-	fsutil.FileGenericSeek `state:"nosave"`
-	fsutil.FileNoFsync     `state:"nosave"`
-	fsutil.FileNoopFlush   `state:"nosave"`
-	fsutil.FileNoMMap      `state:"nosave"`
-	fsutil.FileNoIoctl     `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FileGenericSeek          `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 
 	// di is the inode operations.
 	di *dirInodeOperations
@@ -315,7 +318,9 @@ func (df *dirFileOperations) IterateDir(ctx context.Context, dirCtx *fs.DirCtx, 
 // Readdir implements FileOperations.Readdir.
 func (df *dirFileOperations) Readdir(ctx context.Context, file *fs.File, serializer fs.DentrySerializer) (int64, error) {
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 	dirCtx := &fs.DirCtx{
 		Serializer: serializer,
 		DirCursor:  &df.dirCursor,

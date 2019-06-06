@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,10 +42,12 @@ const (
 //
 // +stateify savable
 type Area struct {
-	waiter.AlwaysReady       `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 
 	ad *Device
 
@@ -239,7 +241,7 @@ func (a *Area) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArgume
 			return 0, syserror.EINVAL
 		}
 
-		// TODO: If personality flag
+		// TODO(b/30946773,gvisor.dev/issue/153): If personality flag
 		// READ_IMPLIES_EXEC is set, set PROT_EXEC if PORT_READ is set.
 
 		a.perms = perms
@@ -289,7 +291,7 @@ func (a *Area) pinOperation(pin linux.AshmemPin, op uint32) (uintptr, error) {
 		return linux.AshmemNotPurged, nil
 
 	case linux.AshmemUnpinIoctl:
-		// TODO: Implement purge on unpin.
+		// TODO(b/30946773): Implement purge on unpin.
 		a.pb.UnpinRange(r)
 		return 0, nil
 

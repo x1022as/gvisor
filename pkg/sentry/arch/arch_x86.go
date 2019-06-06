@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -306,8 +306,8 @@ func (s *State) ptraceGetRegs() syscall.PtraceRegs {
 	// FS/GS_TLS_SEL when fs_base/gs_base is a 64-bit value. (We do the
 	// same in PtraceSetRegs.)
 	//
-	// TODO: Remove this fixup since newer Linux doesn't have
-	// this behavior anymore.
+	// TODO(gvisor.dev/issue/168): Remove this fixup since newer Linux
+	// doesn't have this behavior anymore.
 	if regs.Fs == 0 && regs.Fs_base <= 0xffffffff {
 		regs.Fs = _FS_TLS_SEL
 	}

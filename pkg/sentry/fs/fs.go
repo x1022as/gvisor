@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -155,7 +155,7 @@ type ErrCorruption struct {
 	Err error
 }
 
-// Error returns a sensible description of the save rejection error.
+// Error returns a sensible description of the restore error.
 func (e ErrCorruption) Error() string {
 	return "restore failed due to external file system state in corruption: " + e.Err.Error()
 }

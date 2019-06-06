@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,8 +31,8 @@ import (
 )
 
 func getRuntime() string {
-	r := os.Getenv("RUNSC_RUNTIME")
-	if r == "" {
+	r, ok := os.LookupEnv("RUNSC_RUNTIME")
+	if !ok {
 		return "runsc-test"
 	}
 	return r
@@ -120,7 +120,7 @@ func getLocalPath(file string) string {
 
 // do executes docker command.
 func do(args ...string) (string, error) {
-	fmt.Printf("Running: docker %s\n", args)
+	log.Printf("Running: docker %s\n", args)
 	cmd := exec.Command("docker", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -131,7 +131,7 @@ func do(args ...string) (string, error) {
 
 // doWithPty executes docker command with stdio attached to a pty.
 func doWithPty(args ...string) (*exec.Cmd, *os.File, error) {
-	fmt.Printf("Running with pty: docker %s\n", args)
+	log.Printf("Running with pty: docker %s\n", args)
 	cmd := exec.Command("docker", args...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -160,11 +160,23 @@ func MakeDocker(namePrefix string) Docker {
 	return Docker{Name: RandomName(namePrefix), Runtime: getRuntime()}
 }
 
+// logDockerID logs a container id, which is needed to find container runsc logs.
+func (d *Docker) logDockerID() {
+	id, err := d.ID()
+	if err != nil {
+		log.Printf("%v\n", err)
+	}
+	log.Printf("Name: %s ID: %v\n", d.Name, id)
+}
+
 // Create calls 'docker create' with the arguments provided.
 func (d *Docker) Create(args ...string) error {
 	a := []string{"create", "--runtime", d.Runtime, "--name", d.Name}
 	a = append(a, args...)
 	_, err := do(a...)
+	if err == nil {
+		d.logDockerID()
+	}
 	return err
 }
 
@@ -190,6 +202,9 @@ func (d *Docker) Run(args ...string) error {
 	a := []string{"run", "--runtime", d.Runtime, "--name", d.Name, "-d"}
 	a = append(a, args...)
 	_, err := do(a...)
+	if err == nil {
+		d.logDockerID()
+	}
 	return err
 }
 
@@ -206,6 +221,9 @@ func (d *Docker) RunFg(args ...string) (string, error) {
 	a := []string{"run", "--runtime", d.Runtime, "--name", d.Name}
 	a = append(a, args...)
 	out, err := do(a...)
+	if err == nil {
+		d.logDockerID()
+	}
 	return string(out), err
 }
 
@@ -245,6 +263,22 @@ func (d *Docker) Unpause() error {
 	return nil
 }
 
+// Checkpoint calls 'docker checkpoint'.
+func (d *Docker) Checkpoint(name string) error {
+	if _, err := do("checkpoint", "create", d.Name, name); err != nil {
+		return fmt.Errorf("error pausing container %q: %v", d.Name, err)
+	}
+	return nil
+}
+
+// Restore calls 'docker start --checkname [name]'.
+func (d *Docker) Restore(name string) error {
+	if _, err := do("start", "--checkpoint", name, d.Name); err != nil {
+		return fmt.Errorf("error starting container %q: %v", d.Name, err)
+	}
+	return nil
+}
+
 // Remove calls 'docker rm'.
 func (d *Docker) Remove() error {
 	if _, err := do("rm", d.Name); err != nil {
@@ -255,6 +289,7 @@ func (d *Docker) Remove() error {
 
 // CleanUp kills and deletes the container (best effort).
 func (d *Docker) CleanUp() {
+	d.logDockerID()
 	if _, err := do("kill", d.Name); err != nil {
 		log.Printf("error killing container %q: %v", d.Name, err)
 	}
@@ -334,19 +369,32 @@ func (d *Docker) Wait(timeout time.Duration) (syscall.WaitStatus, error) {
 // WaitForOutput calls 'docker logs' to retrieve containers output and searches
 // for the given pattern.
 func (d *Docker) WaitForOutput(pattern string, timeout time.Duration) (string, error) {
+	matches, err := d.WaitForOutputSubmatch(pattern, timeout)
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	return matches[0], nil
+}
+
+// WaitForOutputSubmatch calls 'docker logs' to retrieve containers output and
+// searches for the given pattern. It returns any regexp submatches as well.
+func (d *Docker) WaitForOutputSubmatch(pattern string, timeout time.Duration) ([]string, error) {
 	re := regexp.MustCompile(pattern)
 	var out string
 	for exp := time.Now().Add(timeout); time.Now().Before(exp); {
 		var err error
 		out, err = d.Logs()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		if match := re.FindString(out); match != "" {
+		if matches := re.FindStringSubmatch(out); matches != nil {
 			// Success!
-			return match, nil
+			return matches, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return "", fmt.Errorf("timeout waiting for output %q: %s", re.String(), out)
+	return nil, fmt.Errorf("timeout waiting for output %q: %s", re.String(), out)
 }

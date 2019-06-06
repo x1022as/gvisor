@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -104,7 +104,7 @@ func New(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSocke
 	// Wait until the sandbox has booted.
 	b := make([]byte, 1)
 	if l, err := clientSyncFile.Read(b); err != nil || l != 1 {
-		return nil, fmt.Errorf("reading from the start-sync descriptor: %v", err)
+		return nil, fmt.Errorf("waiting for sandbox to start: %v", err)
 	}
 
 	c.Release()
@@ -267,7 +267,7 @@ func (s *Sandbox) Event(cid string) (*boot.Event, error) {
 	defer conn.Close()
 
 	var e boot.Event
-	// TODO: Pass in the container id (cid) here. The sandbox
+	// TODO(b/129292330): Pass in the container id (cid) here. The sandbox
 	// should return events only for that container.
 	if err := conn.Call(boot.ContainerEvent, nil, &e); err != nil {
 		return nil, fmt.Errorf("retrieving event data from sandbox: %v", err)
@@ -457,7 +457,7 @@ func (s *Sandbox) createSandboxProcess(spec *specs.Spec, conf *boot.Config, bund
 	}
 
 	if conf.Platform == boot.PlatformPtrace {
-		// TODO: Also set a new PID namespace so that we limit
+		// TODO(b/75837838): Also set a new PID namespace so that we limit
 		// access to other host processes.
 		log.Infof("Sandbox will be started in the current PID namespace")
 	} else {
@@ -472,6 +472,8 @@ func (s *Sandbox) createSandboxProcess(spec *specs.Spec, conf *boot.Config, bund
 	if ns, ok := specutils.GetNS(specs.NetworkNamespace, spec); ok && conf.Network != boot.NetworkNone {
 		log.Infof("Sandbox will be started in the container's network namespace: %+v", ns)
 		nss = append(nss, ns)
+	} else if conf.Network == boot.NetworkHost {
+		log.Infof("Sandbox will be started in the host network namespace")
 	} else {
 		log.Infof("Sandbox will be started in new network namespace")
 		nss = append(nss, specs.LinuxNamespace{Type: specs.NetworkNamespace})
@@ -520,7 +522,7 @@ func (s *Sandbox) createSandboxProcess(spec *specs.Spec, conf *boot.Config, bund
 			// root for itself, so it has to have the CAP_SYS_ADMIN
 			// capability.
 			//
-			// FIXME: The current implementations of
+			// FIXME(b/122554829): The current implementations of
 			// os/exec doesn't allow to set ambient capabilities if
 			// a process is started in a new user namespace. As a
 			// workaround, we start the sandbox process with the 0
@@ -601,7 +603,7 @@ func (s *Sandbox) createSandboxProcess(spec *specs.Spec, conf *boot.Config, bund
 	log.Debugf("Starting sandbox: %s %v", binPath, cmd.Args)
 	log.Debugf("SysProcAttr: %+v", cmd.SysProcAttr)
 	if err := specutils.StartInNS(cmd, nss); err != nil {
-		return err
+		return fmt.Errorf("Sandbox: %v", err)
 	}
 	s.child = true
 	s.Pid = cmd.Process.Pid
@@ -647,7 +649,7 @@ func (s *Sandbox) Wait(cid string) (syscall.WaitStatus, error) {
 
 // WaitPID waits for process 'pid' in the container's sandbox and returns its
 // WaitStatus.
-func (s *Sandbox) WaitPID(cid string, pid int32, clearStatus bool) (syscall.WaitStatus, error) {
+func (s *Sandbox) WaitPID(cid string, pid int32) (syscall.WaitStatus, error) {
 	log.Debugf("Waiting for PID %d in sandbox %q", pid, s.ID)
 	var ws syscall.WaitStatus
 	conn, err := s.sandboxConnect()
@@ -657,9 +659,8 @@ func (s *Sandbox) WaitPID(cid string, pid int32, clearStatus bool) (syscall.Wait
 	defer conn.Close()
 
 	args := &boot.WaitPIDArgs{
-		PID:         pid,
-		CID:         cid,
-		ClearStatus: clearStatus,
+		PID: pid,
+		CID: cid,
 	}
 	if err := conn.Call(boot.ContainerWaitPID, args, &ws); err != nil {
 		return ws, fmt.Errorf("waiting on PID %d in sandbox %q: %v", pid, s.ID, err)
@@ -877,6 +878,41 @@ func (s *Sandbox) StopCPUProfile() error {
 
 	if err := conn.Call(boot.StopCPUProfile, nil, nil); err != nil {
 		return fmt.Errorf("stopping sandbox %q CPU profile: %v", s.ID, err)
+	}
+	return nil
+}
+
+// StartTrace start trace  writing to the given file.
+func (s *Sandbox) StartTrace(f *os.File) error {
+	log.Debugf("Trace start %q", s.ID)
+	conn, err := s.sandboxConnect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	opts := control.ProfileOpts{
+		FilePayload: urpc.FilePayload{
+			Files: []*os.File{f},
+		},
+	}
+	if err := conn.Call(boot.StartTrace, &opts, nil); err != nil {
+		return fmt.Errorf("starting sandbox %q trace: %v", s.ID, err)
+	}
+	return nil
+}
+
+// StopTrace stops a previously started trace..
+func (s *Sandbox) StopTrace() error {
+	log.Debugf("Trace stop %q", s.ID)
+	conn, err := s.sandboxConnect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if err := conn.Call(boot.StopTrace, nil, nil); err != nil {
+		return fmt.Errorf("stopping sandbox %q trace: %v", s.ID, err)
 	}
 	return nil
 }

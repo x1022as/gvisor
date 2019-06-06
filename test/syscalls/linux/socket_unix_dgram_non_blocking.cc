@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ using NonBlockingDgramUnixSocketPairTest = SocketPairTest;
 
 TEST_P(NonBlockingDgramUnixSocketPairTest, ReadOneSideClosed) {
   if (IsRunningOnGvisor()) {
-    // FIXME: gVisor datagram sockets return 0 instead of
+    // FIXME(b/70803293): gVisor datagram sockets return 0 instead of
     // EAGAIN.
     return;
   }
@@ -43,8 +43,8 @@ TEST_P(NonBlockingDgramUnixSocketPairTest, ReadOneSideClosed) {
               SyscallFailsWithErrno(EAGAIN));
 }
 
-INSTANTIATE_TEST_CASE_P(
-    AllUnixDomainSockets, NonBlockingDgramUnixSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    NonBlockingDgramUnixSockets, NonBlockingDgramUnixSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(std::vector<SocketPairKind>{
         UnixDomainSocketPair(SOCK_DGRAM | SOCK_NONBLOCK),
         FilesystemBoundUnixDomainSocketPair(SOCK_DGRAM | SOCK_NONBLOCK),

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -318,7 +318,7 @@ func (d *Dirent) SyncAll(ctx context.Context) {
 
 	// There is nothing to sync for a read-only filesystem.
 	if !d.Inode.MountSource.Flags.ReadOnly {
-		// FIXME: This should be a mount traversal, not a
+		// FIXME(b/34856369): This should be a mount traversal, not a
 		// Dirent traversal, because some Inodes that need to be synced
 		// may no longer be reachable by name (after sys_unlink).
 		//
@@ -457,11 +457,6 @@ func (d *Dirent) descendantOf(p *Dirent) bool {
 func (d *Dirent) walk(ctx context.Context, root *Dirent, name string, walkMayUnlock bool) (*Dirent, error) {
 	if !IsDir(d.Inode.StableAttr) {
 		return nil, syscall.ENOTDIR
-	}
-
-	// The component must be less than NAME_MAX.
-	if len(name) > linux.NAME_MAX {
-		return nil, syscall.ENAMETOOLONG
 	}
 
 	if name == "" || name == "." {
@@ -1377,15 +1372,14 @@ func (d *Dirent) dropExtendedReference() {
 // lockForRename takes locks on oldParent and newParent as required by Rename
 // and returns a function that will unlock the locks taken. The returned
 // function must be called even if a non-nil error is returned.
-//
-// Note that lockForRename does not take renameMu if the source and destination
-// of the rename are within the same directory.
 func lockForRename(oldParent *Dirent, oldName string, newParent *Dirent, newName string) (func(), error) {
+	renameMu.Lock()
 	if oldParent == newParent {
-		// Rename source and destination are in the same directory. In
-		// this case, we only need to take a lock on that directory.
 		oldParent.mu.Lock()
-		return oldParent.mu.Unlock, nil
+		return func() {
+			oldParent.mu.Unlock()
+			renameMu.Unlock()
+		}, nil
 	}
 
 	// Renaming between directories is a bit subtle:
@@ -1398,7 +1392,6 @@ func lockForRename(oldParent *Dirent, oldName string, newParent *Dirent, newName
 	// lock on the ancestor; to avoid this, ensure we take locks in the same
 	// ancestor-to-descendant order. (Holding renameMu prevents this
 	// relationship from changing.)
-	renameMu.Lock()
 
 	// First check if newParent is a descendant of oldParent.
 	child := newParent
@@ -1513,7 +1506,7 @@ func Rename(ctx context.Context, root *Dirent, oldParent *Dirent, oldName string
 	}
 
 	// Are we frozen?
-	// TODO: Is this the right errno?
+	// TODO(jamieliu): Is this the right errno?
 	if oldParent.frozen && !oldParent.Inode.IsVirtual() {
 		return syscall.ENOENT
 	}
@@ -1572,7 +1565,7 @@ func Rename(ctx context.Context, root *Dirent, oldParent *Dirent, oldName string
 	} else {
 		// Check constraints on the dirent being replaced.
 
-		// NOTE: We don't want to keep replaced alive
+		// NOTE(b/111808347): We don't want to keep replaced alive
 		// across the Rename, so must call DecRef manually (no defer).
 
 		// Check that we can delete replaced.
@@ -1613,7 +1606,7 @@ func Rename(ctx context.Context, root *Dirent, oldParent *Dirent, oldName string
 		// Allow the file system to drop extra references on replaced.
 		replaced.dropExtendedReference()
 
-		// NOTE: Keeping a dirent
+		// NOTE(b/31798319,b/31867149,b/31867671): Keeping a dirent
 		// open across renames is currently broken for multiple
 		// reasons, so we flush all references on the replaced node and
 		// its children.

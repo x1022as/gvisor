@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -344,11 +344,8 @@ func (t *TTYFileOperations) checkChange(ctx context.Context, sig linux.Signal) e
 	// 040b6362d58f "tty: fix leakage of -ERESTARTSYS to userland" doesn't
 	// apply: the sentry will handle -ERESTARTSYS in
 	// kernel.runApp.execute() even if the kernel.Task isn't interrupted.
-	si := arch.SignalInfo{
-		Code:  arch.SignalInfoKernel,
-		Signo: int32(sig),
-	}
+	//
 	// Linux ignores the result of kill_pgrp().
-	_ = pg.SendSignal(&si)
+	_ = pg.SendSignal(kernel.SignalInfoPriv(sig))
 	return kernel.ERESTARTSYS
 }

@@ -3,8 +3,8 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
     name = "io_bazel_rules_go",
-    sha256 = "77dfd303492f2634de7a660445ee2d3de2960cbd52f97d8c0dffa9362d3ddef9",
-    url = "https://github.com/bazelbuild/rules_go/releases/download/0.18.1/rules_go-0.18.1.tar.gz",
+    sha256 = "a82a352bffae6bee4e95f68a8d80a70e87f42c4741e6a448bec11998fcc82329",
+    url = "https://github.com/bazelbuild/rules_go/releases/download/0.18.5/rules_go-0.18.5.tar.gz",
 )
 
 http_archive(
@@ -17,7 +17,7 @@ load("@io_bazel_rules_go//go:deps.bzl", "go_rules_dependencies", "go_register_to
 
 go_rules_dependencies()
 
-go_register_toolchains(go_version = "1.12.1")
+go_register_toolchains(go_version = "1.12.5")
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies", "go_repository")
 
@@ -27,132 +27,156 @@ gazelle_dependencies()
 # See releases at https://releases.bazel.build/bazel-toolchains.html
 http_archive(
     name = "bazel_toolchains",
-    sha256 = "4b1468b254a572dbe134cc1fd7c6eab1618a72acd339749ea343bd8f55c3b7eb",
-    strip_prefix = "bazel-toolchains-d665ccfa3e9c90fa789671bf4ef5f7c19c5715c4",
+    sha256 = "67335b3563d9b67dc2550b8f27cc689b64fadac491e69ce78763d9ba894cc5cc",
+    strip_prefix = "bazel-toolchains-cddc376d428ada2927ad359211c3e356bd9c9fbb",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/bazel-toolchains/archive/d665ccfa3e9c90fa789671bf4ef5f7c19c5715c4.tar.gz",
-        "https://github.com/bazelbuild/bazel-toolchains/archive/d665ccfa3e9c90fa789671bf4ef5f7c19c5715c4.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-toolchains/archive/cddc376d428ada2927ad359211c3e356bd9c9fbb.tar.gz",
+        "https://github.com/bazelbuild/bazel-toolchains/archive/cddc376d428ada2927ad359211c3e356bd9c9fbb.tar.gz",
     ],
 )
 
 # External repositories, in sorted order.
 go_repository(
     name = "com_github_cenkalti_backoff",
-    commit = "66e726b43552c0bab0539b28e640b89fd6862115",
+    commit = "2146c9339422",
     importpath = "github.com/cenkalti/backoff",
 )
 
 go_repository(
     name = "com_github_gofrs_flock",
-    commit = "886344bea0798d02ff3fae16a922be5f6b26cee0",
+    commit = "886344bea079",
     importpath = "github.com/gofrs/flock",
 )
 
 go_repository(
     name = "com_github_golang_mock",
-    commit = "600781dde9cca80734169b9e969d9054ccc57937",
     importpath = "github.com/golang/mock",
+    tag = "v1.3.1",
 )
 
 go_repository(
     name = "com_github_google_go-cmp",
-    commit = "3af367b6b30c263d47e8895973edcca9a49cf029",
     importpath = "github.com/google/go-cmp",
+    tag = "v0.2.0",
 )
 
 go_repository(
     name = "com_github_google_subcommands",
-    commit = "ce3d4cfc062faac7115d44e5befec8b5a08c3faa",
+    commit = "ce3d4cfc062f",
     importpath = "github.com/google/subcommands",
 )
 
 go_repository(
     name = "com_github_google_uuid",
-    commit = "dec09d789f3dba190787f8b4454c7d3c936fed9e",
+    commit = "dec09d789f3d",
     importpath = "github.com/google/uuid",
 )
 
 go_repository(
     name = "com_github_kr_pty",
-    commit = "282ce0e5322c82529687d609ee670fac7c7d917c",
     importpath = "github.com/kr/pty",
+    tag = "v1.1.1",
 )
 
 go_repository(
     name = "com_github_opencontainers_runtime-spec",
-    commit = "b2d941ef6a780da2d9982c1fb28d77ad97f54fc7",
+    commit = "b2d941ef6a78",
     importpath = "github.com/opencontainers/runtime-spec",
 )
 
 go_repository(
     name = "com_github_syndtr_gocapability",
-    commit = "d98352740cb2c55f81556b63d4a1ec64c5a319c2",
+    commit = "d98352740cb2",
     importpath = "github.com/syndtr/gocapability",
 )
 
 go_repository(
     name = "com_github_vishvananda_netlink",
-    commit = "adb577d4a45e341da53c4d9196ad4222c9a23e69",
+    commit = "adb577d4a45e",
     importpath = "github.com/vishvananda/netlink",
 )
 
 go_repository(
     name = "com_github_vishvananda_netns",
-    commit = "be1fbeda19366dea804f00efff2dd73a1642fdcc",
+    commit = "be1fbeda1936",
     importpath = "github.com/vishvananda/netns",
 )
 
 go_repository(
+    name = "org_golang_x_crypto",
+    commit = "c2843e01d9a2",
+    importpath = "golang.org/x/crypto",
+)
+
+go_repository(
     name = "org_golang_x_net",
-    commit = "b3c676e531a6dc479fa1b35ac961c13f5e2b4d2e",
+    commit = "d8887717615a",
     importpath = "golang.org/x/net",
 )
 
 go_repository(
+    name = "org_golang_x_text",
+    importpath = "golang.org/x/text",
+    tag = "v0.3.0",
+)
+
+go_repository(
+    name = "org_golang_x_tools",
+    commit = "36563e24a262",
+    importpath = "golang.org/x/tools",
+)
+
+go_repository(
+    name = "org_golang_x_sync",
+    commit = "112230192c58",
+    importpath = "golang.org/x/sync",
+)
+
+go_repository(
     name = "org_golang_x_sys",
-    commit = "0dd5e194bbf5eb84a39666eb4c98a4d007e4203a",
+    commit = "d0b11bdaac8a",
     importpath = "golang.org/x/sys",
 )
 
 go_repository(
     name = "com_github_google_btree",
-    commit = "4030bb1f1f0c35b30ca7009e9ebd06849dd45306",
     importpath = "github.com/google/btree",
+    tag = "v1.0.0",
+)
+
+go_repository(
+    name = "com_github_golang_protobuf",
+    importpath = "github.com/golang/protobuf",
+    tag = "v1.3.1",
 )
 
 # System Call test dependencies.
 http_archive(
     name = "com_github_gflags_gflags",
-    sha256 = "6e16c8bc91b1310a44f3965e616383dbda48f83e8c1eaa2370a215057b00cabe",
-    strip_prefix = "gflags-77592648e3f3be87d6c7123eb81cbad75f9aef5a",
+    sha256 = "34af2f15cf7367513b352bdcd2493ab14ce43692d2dcd9dfc499492966c64dcf",
+    strip_prefix = "gflags-2.2.2",
     urls = [
-        "https://mirror.bazel.build/github.com/gflags/gflags/archive/77592648e3f3be87d6c7123eb81cbad75f9aef5a.tar.gz",
-        "https://github.com/gflags/gflags/archive/77592648e3f3be87d6c7123eb81cbad75f9aef5a.tar.gz",
+        "https://mirror.bazel.build/github.com/gflags/gflags/archive/v2.2.2.tar.gz",
+        "https://github.com/gflags/gflags/archive/v2.2.2.tar.gz",
     ],
 )
 
 http_archive(
     name = "com_google_absl",
-    strip_prefix = "abseil-cpp-master",
-    urls = ["https://github.com/abseil/abseil-cpp/archive/master.zip"],
-)
-
-http_archive(
-    name = "com_google_glog",
-    sha256 = "eaabbfc16ecfacb36960ca9c8977f40172c51e4b03234331a1f84040a77ab12c",
-    strip_prefix = "glog-781096619d3dd368cfebd33889e417a168493ce7",
+    sha256 = "01ba1185a0e6e048e4890f39e383515195bc335f0627cdddc0c325ee68be4434",
+    strip_prefix = "abseil-cpp-cd86d0d20ab167c33b23d3875db68d1d4bad3a3b",
     urls = [
-        "https://mirror.bazel.build/github.com/google/glog/archive/781096619d3dd368cfebd33889e417a168493ce7.tar.gz",
-        "https://github.com/google/glog/archive/781096619d3dd368cfebd33889e417a168493ce7.tar.gz",
+        "https://mirror.bazel.build/github.com/abseil/abseil-cpp/archive/cd86d0d20ab167c33b23d3875db68d1d4bad3a3b.tar.gz",
+        "https://github.com/abseil/abseil-cpp/archive/cd86d0d20ab167c33b23d3875db68d1d4bad3a3b.tar.gz",
     ],
 )
 
 http_archive(
     name = "com_google_googletest",
-    sha256 = "353ab86e35cea1cd386115279cf4b16695bbf21b897bfbf2721cf4cb5f64ade8",
-    strip_prefix = "googletest-997d343dd680e541ef96ce71ee54a91daf2577a0",
+    sha256 = "db657310d3c5ca2d3f674e3a4b79718d1d39da70604568ee0568ba8e39065ef4",
+    strip_prefix = "googletest-31200def0dec8a624c861f919e86e4444e6e6ee7",
     urls = [
-        "https://mirror.bazel.build/github.com/google/googletest/archive/997d343dd680e541ef96ce71ee54a91daf2577a0.zip",
-        "https://github.com/google/googletest/archive/997d343dd680e541ef96ce71ee54a91daf2577a0.zip",
+        "https://mirror.bazel.build/github.com/google/googletest/archive/31200def0dec8a624c861f919e86e4444e6e6ee7.tar.gz",
+        "https://github.com/google/googletest/archive/31200def0dec8a624c861f919e86e4444e6e6ee7.tar.gz",
     ],
 )

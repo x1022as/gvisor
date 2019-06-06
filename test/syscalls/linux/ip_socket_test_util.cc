@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ namespace gvisor {
 namespace testing {
 
 PosixErrorOr<int> InterfaceIndex(std::string name) {
-  // TODO: Consider using netlink.
+  // TODO(igudger): Consider using netlink.
   ifreq req = {};
   memcpy(req.ifr_name, name.c_str(), name.size());
   ASSIGN_OR_RETURN_ERRNO(auto sock, Socket(AF_INET, SOCK_DGRAM, 0));

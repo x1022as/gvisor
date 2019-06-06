@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,8 @@ import (
 
 // encoder is used for messages and 9P primitives.
 type encoder interface {
-	// Decode decodes from the given buffer.
+	// Decode decodes from the given buffer. Decode may be called more than once
+	// to reuse the instance. It must clear any previous state.
 	//
 	// This may not fail, exhaustion will be recorded in the buffer.
 	Decode(b *buffer)

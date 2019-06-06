@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -219,8 +219,8 @@ func (pg *ProcessGroup) handleOrphan() {
 			return
 		}
 		tg.signalHandlers.mu.Lock()
-		tg.leader.sendSignalLocked(sigPriv(linux.SIGHUP), true /* group */)
-		tg.leader.sendSignalLocked(sigPriv(linux.SIGCONT), true /* group */)
+		tg.leader.sendSignalLocked(SignalInfoPriv(linux.SIGHUP), true /* group */)
+		tg.leader.sendSignalLocked(SignalInfoPriv(linux.SIGCONT), true /* group */)
 		tg.signalHandlers.mu.Unlock()
 	})
 

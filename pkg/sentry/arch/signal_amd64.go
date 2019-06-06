@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -319,7 +319,7 @@ func (c *context64) NewSignalStack() NativeSignalStack {
 // From Linux 'arch/x86/include/uapi/asm/sigcontext.h' the following is the
 // size of the magic cookie at the end of the xsave frame.
 //
-// NOTE: Currently we don't actually populate the fpstate
+// NOTE(b/33003106#comment11): Currently we don't actually populate the fpstate
 // on the signal stack.
 const _FP_XSTATE_MAGIC2_SIZE = 4
 
@@ -392,15 +392,16 @@ func (c *context64) SignalSetup(st *Stack, act *SignalAct, info *SignalInfo, alt
 		Sigset: sigset,
 	}
 
-	// TODO: Set SignalContext64.Err, Trapno, and Cr2 based on
-	// the fault that caused the signal. For now, leave Err and Trapno
-	// unset and assume CR2 == info.Addr() for SIGSEGVs and SIGBUSes.
+	// TODO(gvisor.dev/issue/159): Set SignalContext64.Err, Trapno, and Cr2
+	// based on the fault that caused the signal. For now, leave Err and
+	// Trapno unset and assume CR2 == info.Addr() for SIGSEGVs and
+	// SIGBUSes.
 	if linux.Signal(info.Signo) == linux.SIGSEGV || linux.Signal(info.Signo) == linux.SIGBUS {
 		uc.MContext.Cr2 = info.Addr()
 	}
 
-	// "... the value (%rsp+8) is always a multiple of 16 (...) when control is
-	// transferred to the function entry point." - AMD64 ABI
+	// "... the value (%rsp+8) is always a multiple of 16 (...) when
+	// control is transferred to the function entry point." - AMD64 ABI
 	ucSize := binary.Size(uc)
 	if ucSize < 0 {
 		// This can only happen if we've screwed up the definition of
@@ -504,7 +505,7 @@ func (c *context64) SignalRestore(st *Stack, rt bool) (linux.SignalSet, SignalSt
 	l := len(c.sigFPState)
 	if l > 0 {
 		c.x86FPState = c.sigFPState[l-1]
-		// NOTE: State save requires that any slice
+		// NOTE(cl/133042258): State save requires that any slice
 		// elements from '[len:cap]' to be zero value.
 		c.sigFPState[l-1] = nil
 		c.sigFPState = c.sigFPState[0 : l-1]

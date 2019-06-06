@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -317,7 +317,7 @@ func accept(t *kernel.Task, fd kdefs.FD, addr usermem.Addr, addrLen usermem.Addr
 		return 0, syserror.ConvertIntr(e.ToError(), kernel.ERESTARTSYS)
 	}
 	if peerRequested {
-		// NOTE: Linux does not give you an error if it can't
+		// NOTE(magi): Linux does not give you an error if it can't
 		// write the data back out so neither do we.
 		if err := writeAddress(t, peer, peerLen, addr, addrLen); err == syscall.EINVAL {
 			return 0, err
@@ -735,24 +735,25 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 		return 0, err
 	}
 
-	// FIXME: Pretend we have an empty error queue.
+	// FIXME(b/63594852): Pretend we have an empty error queue.
 	if flags&linux.MSG_ERRQUEUE != 0 {
 		return 0, syscall.EAGAIN
 	}
 
 	// Fast path when no control message nor name buffers are provided.
 	if msg.ControlLen == 0 && msg.NameLen == 0 {
-		n, _, _, cms, err := s.RecvMsg(t, dst, int(flags), haveDeadline, deadline, false, 0)
+		n, mflags, _, _, cms, err := s.RecvMsg(t, dst, int(flags), haveDeadline, deadline, false, 0)
 		if err != nil {
 			return 0, syserror.ConvertIntr(err.ToError(), kernel.ERESTARTSYS)
 		}
-		cms.Unix.Release()
+		if !cms.Unix.Empty() {
+			mflags |= linux.MSG_CTRUNC
+			cms.Unix.Release()
+		}
 
-		if msg.Flags != 0 {
+		if int(msg.Flags) != mflags {
 			// Copy out the flags to the caller.
-			//
-			// TODO: Plumb through actual flags.
-			if _, err := t.CopyOut(msgPtr+flagsOffset, int32(0)); err != nil {
+			if _, err := t.CopyOut(msgPtr+flagsOffset, int32(mflags)); err != nil {
 				return 0, err
 			}
 		}
@@ -763,7 +764,7 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 	if msg.ControlLen > maxControlLen {
 		return 0, syscall.ENOBUFS
 	}
-	n, sender, senderLen, cms, e := s.RecvMsg(t, dst, int(flags), haveDeadline, deadline, msg.NameLen != 0, msg.ControlLen)
+	n, mflags, sender, senderLen, cms, e := s.RecvMsg(t, dst, int(flags), haveDeadline, deadline, msg.NameLen != 0, msg.ControlLen)
 	if e != nil {
 		return 0, syserror.ConvertIntr(e.ToError(), kernel.ERESTARTSYS)
 	}
@@ -773,7 +774,7 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 
 	if cr, ok := s.(transport.Credentialer); ok && cr.Passcred() {
 		creds, _ := cms.Unix.Credentials.(control.SCMCredentials)
-		controlData = control.PackCredentials(t, creds, controlData)
+		controlData, mflags = control.PackCredentials(t, creds, controlData, mflags)
 	}
 
 	if cms.IP.HasTimestamp {
@@ -781,7 +782,7 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 	}
 
 	if cms.Unix.Rights != nil {
-		controlData = control.PackRights(t, cms.Unix.Rights.(control.SCMRights), flags&linux.MSG_CMSG_CLOEXEC != 0, controlData)
+		controlData, mflags = control.PackRights(t, cms.Unix.Rights.(control.SCMRights), flags&linux.MSG_CMSG_CLOEXEC != 0, controlData, mflags)
 	}
 
 	// Copy the address to the caller.
@@ -802,9 +803,7 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 	}
 
 	// Copy out the flags to the caller.
-	//
-	// TODO: Plumb through actual flags.
-	if _, err := t.CopyOut(msgPtr+flagsOffset, int32(0)); err != nil {
+	if _, err := t.CopyOut(msgPtr+flagsOffset, int32(mflags)); err != nil {
 		return 0, err
 	}
 
@@ -856,7 +855,7 @@ func recvFrom(t *kernel.Task, fd kdefs.FD, bufPtr usermem.Addr, bufLen uint64, f
 		flags |= linux.MSG_DONTWAIT
 	}
 
-	n, sender, senderLen, cm, e := s.RecvMsg(t, dst, int(flags), haveDeadline, deadline, nameLenPtr != 0, 0)
+	n, _, sender, senderLen, cm, e := s.RecvMsg(t, dst, int(flags), haveDeadline, deadline, nameLenPtr != 0, 0)
 	cm.Unix.Release()
 	if e != nil {
 		return 0, syserror.ConvertIntr(e.ToError(), kernel.ERESTARTSYS)

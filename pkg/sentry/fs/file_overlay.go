@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package fs
 import (
 	"sync"
 
-	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/refs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
@@ -160,7 +159,7 @@ func (f *overlayFileOperations) Seek(ctx context.Context, file *File, whence See
 	// If this was a seek on a directory, we must update the cursor.
 	if seekDir && whence == SeekSet && offset == 0 {
 		// Currently only seeking to 0 on a directory is supported.
-		// FIXME: Lift directory seeking limitations.
+		// FIXME(b/33075855): Lift directory seeking limitations.
 		f.dirCursor = ""
 	}
 	return n, nil
@@ -169,7 +168,9 @@ func (f *overlayFileOperations) Seek(ctx context.Context, file *File, whence See
 // Readdir implements FileOperations.Readdir.
 func (f *overlayFileOperations) Readdir(ctx context.Context, file *File, serializer DentrySerializer) (int64, error) {
 	root := RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 	dirCtx := &DirCtx{
 		Serializer: serializer,
 		DirCursor:  &f.dirCursor,
@@ -220,31 +221,50 @@ func (f *overlayFileOperations) IterateDir(ctx context.Context, dirCtx *DirCtx, 
 	return offset + n, err
 }
 
-// Read implements FileOperations.Read.
-func (f *overlayFileOperations) Read(ctx context.Context, file *File, dst usermem.IOSequence, offset int64) (int64, error) {
-	o := file.Dirent.Inode.overlay
+// onTop performs the given operation on the top-most available layer.
+func (f *overlayFileOperations) onTop(ctx context.Context, file *File, fn func(*File, FileOperations) error) error {
+	file.Dirent.Inode.overlay.copyMu.RLock()
+	defer file.Dirent.Inode.overlay.copyMu.RUnlock()
 
-	o.copyMu.RLock()
-	defer o.copyMu.RUnlock()
-
-	if o.upper != nil {
-		// We may need to acquire an open file handle to read from if
-		// copy up has occurred. Otherwise we risk reading from the
-		// wrong source.
-		f.upperMu.Lock()
-		if f.upper == nil {
-			var err error
-			f.upper, err = overlayFile(ctx, o.upper, file.Flags())
-			if err != nil {
-				f.upperMu.Unlock()
-				log.Warningf("failed to acquire handle with flags %v: %v", file.Flags(), err)
-				return 0, syserror.EIO
-			}
-		}
-		f.upperMu.Unlock()
-		return f.upper.FileOperations.Read(ctx, f.upper, dst, offset)
+	// Only lower layer is available.
+	if file.Dirent.Inode.overlay.upper == nil {
+		return fn(f.lower, f.lower.FileOperations)
 	}
-	return f.lower.FileOperations.Read(ctx, f.lower, dst, offset)
+
+	f.upperMu.Lock()
+	if f.upper == nil {
+		upper, err := overlayFile(ctx, file.Dirent.Inode.overlay.upper, file.Flags())
+		if err != nil {
+			// Something very wrong; return a generic filesystem
+			// error to avoid propagating internals.
+			f.upperMu.Unlock()
+			return syserror.EIO
+		}
+
+		// Save upper file.
+		f.upper = upper
+	}
+	f.upperMu.Unlock()
+
+	return fn(f.upper, f.upper.FileOperations)
+}
+
+// Read implements FileOperations.Read.
+func (f *overlayFileOperations) Read(ctx context.Context, file *File, dst usermem.IOSequence, offset int64) (n int64, err error) {
+	err = f.onTop(ctx, file, func(file *File, ops FileOperations) error {
+		n, err = ops.Read(ctx, file, dst, offset)
+		return err // Will overwrite itself.
+	})
+	return
+}
+
+// WriteTo implements FileOperations.WriteTo.
+func (f *overlayFileOperations) WriteTo(ctx context.Context, file *File, dst *File, opts SpliceOpts) (n int64, err error) {
+	err = f.onTop(ctx, file, func(file *File, ops FileOperations) error {
+		n, err = ops.WriteTo(ctx, file, dst, opts)
+		return err // Will overwrite itself.
+	})
+	return
 }
 
 // Write implements FileOperations.Write.
@@ -255,15 +275,20 @@ func (f *overlayFileOperations) Write(ctx context.Context, file *File, src userm
 	return f.upper.FileOperations.Write(ctx, f.upper, src, offset)
 }
 
+// ReadFrom implements FileOperations.ReadFrom.
+func (f *overlayFileOperations) ReadFrom(ctx context.Context, file *File, src *File, opts SpliceOpts) (n int64, err error) {
+	// See above; f.upper must be non-nil.
+	return f.upper.FileOperations.ReadFrom(ctx, f.upper, src, opts)
+}
+
 // Fsync implements FileOperations.Fsync.
-func (f *overlayFileOperations) Fsync(ctx context.Context, file *File, start, end int64, syncType SyncType) error {
-	var err error
+func (f *overlayFileOperations) Fsync(ctx context.Context, file *File, start, end int64, syncType SyncType) (err error) {
 	f.upperMu.Lock()
 	if f.upper != nil {
 		err = f.upper.FileOperations.Fsync(ctx, f.upper, start, end, syncType)
 	}
 	f.upperMu.Unlock()
-	if f.lower != nil {
+	if err == nil && f.lower != nil {
 		// N.B. Fsync on the lower filesystem can cause writes of file
 		// attributes (i.e. access time) despite the fact that we must
 		// treat the lower filesystem as read-only.
@@ -275,15 +300,14 @@ func (f *overlayFileOperations) Fsync(ctx context.Context, file *File, start, en
 }
 
 // Flush implements FileOperations.Flush.
-func (f *overlayFileOperations) Flush(ctx context.Context, file *File) error {
+func (f *overlayFileOperations) Flush(ctx context.Context, file *File) (err error) {
 	// Flush whatever handles we have.
-	var err error
 	f.upperMu.Lock()
 	if f.upper != nil {
 		err = f.upper.FileOperations.Flush(ctx, f.upper)
 	}
 	f.upperMu.Unlock()
-	if f.lower != nil {
+	if err == nil && f.lower != nil {
 		err = f.lower.FileOperations.Flush(ctx, f.lower)
 	}
 	return err
@@ -327,7 +351,8 @@ func (*overlayFileOperations) ConfigureMMap(ctx context.Context, file *File, opt
 	if !o.isMappableLocked() {
 		return syserror.ENODEV
 	}
-	// FIXME: This is a copy/paste of fsutil.GenericConfigureMMap,
+
+	// FIXME(jamieliu): This is a copy/paste of fsutil.GenericConfigureMMap,
 	// which we can't use because the overlay implementation is in package fs,
 	// so depending on fs/fsutil would create a circular dependency. Move
 	// overlay to fs/overlay.
@@ -335,6 +360,32 @@ func (*overlayFileOperations) ConfigureMMap(ctx context.Context, file *File, opt
 	opts.MappingIdentity = file
 	file.IncRef()
 	return nil
+}
+
+// UnstableAttr implements fs.FileOperations.UnstableAttr.
+func (f *overlayFileOperations) UnstableAttr(ctx context.Context, file *File) (UnstableAttr, error) {
+	// Hot path. Avoid defers.
+	f.upperMu.Lock()
+	if f.upper != nil {
+		attr, err := f.upper.UnstableAttr(ctx)
+		f.upperMu.Unlock()
+		return attr, err
+	}
+	f.upperMu.Unlock()
+
+	// It's possible that copy-up has occurred, but we haven't opened a upper
+	// file yet. If this is the case, just use the upper inode's UnstableAttr
+	// rather than opening a file.
+	o := file.Dirent.Inode.overlay
+	o.copyMu.RLock()
+	if o.upper != nil {
+		attr, err := o.upper.UnstableAttr(ctx)
+		o.copyMu.RUnlock()
+		return attr, err
+	}
+	o.copyMu.RUnlock()
+
+	return f.lower.UnstableAttr(ctx)
 }
 
 // Ioctl implements fs.FileOperations.Ioctl and always returns ENOTTY.
@@ -440,7 +491,11 @@ func (omi *overlayMappingIdentity) InodeID() uint64 {
 
 // MappedName implements MappingIdentity.MappedName.
 func (omi *overlayMappingIdentity) MappedName(ctx context.Context) string {
-	name, _ := omi.overlayFile.Dirent.FullName(RootFromContext(ctx))
+	root := RootFromContext(ctx)
+	if root != nil {
+		defer root.DecRef()
+	}
+	name, _ := omi.overlayFile.Dirent.FullName(root)
 	return name
 }
 

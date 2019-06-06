@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,8 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-// +build amd64
 
 package seccomp
 
@@ -65,9 +63,6 @@ func isKillProcessAvailable() (bool, error) {
 //
 //go:nosplit
 func seccomp(op, flags uint32, ptr unsafe.Pointer) syscall.Errno {
-	// SYS_SECCOMP is not available in syscall package.
-	const SYS_SECCOMP = 317
-
 	if _, _, errno := syscall.RawSyscall(SYS_SECCOMP, uintptr(op), uintptr(flags), uintptr(ptr)); errno != 0 {
 		return errno
 	}

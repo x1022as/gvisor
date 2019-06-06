@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,8 +62,14 @@ var allowedSyscalls = seccomp.SyscallRules{
 	},
 	syscall.SYS_EXIT:       {},
 	syscall.SYS_EXIT_GROUP: {},
-	syscall.SYS_FCHMOD:     {},
-	syscall.SYS_FCHOWNAT:   {},
+	syscall.SYS_FALLOCATE: []seccomp.Rule{
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowValue(0),
+		},
+	},
+	syscall.SYS_FCHMOD:   {},
+	syscall.SYS_FCHOWNAT: {},
 	syscall.SYS_FCNTL: []seccomp.Rule{
 		{
 			seccomp.AllowAny{},

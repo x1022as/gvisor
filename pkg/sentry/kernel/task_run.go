@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
-	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
 
 // A taskRunState is a reified state in the task state machine. See README.md
@@ -110,7 +109,7 @@ func (t *Task) doStop() {
 		return
 	}
 	t.Deactivate()
-	// NOTE: t.Activate() must be called without any locks held, so
+	// NOTE(b/30316266): t.Activate() must be called without any locks held, so
 	// this defer must precede the defer for unlocking the signal mutex.
 	defer t.Activate()
 	t.accountTaskGoroutineEnter(TaskGoroutineStopped)
@@ -176,7 +175,7 @@ func (*runApp) execute(t *Task) taskRunState {
 				if err := t.rseqCopyOutCPU(); err != nil {
 					t.Warningf("Failed to copy CPU to %#x for RSEQ: %v", t.rseqCPUAddr, err)
 					t.forceSignal(linux.SIGSEGV, false)
-					t.SendSignal(sigPriv(linux.SIGSEGV))
+					t.SendSignal(SignalInfoPriv(linux.SIGSEGV))
 					// Re-enter the task run loop for signal delivery.
 					return (*runApp)(nil)
 				}
@@ -267,13 +266,8 @@ func (*runApp) execute(t *Task) taskRunState {
 				}
 			}
 
-			// The JVM will trigger these errors constantly, so don't
-			// spam logs with this error.
-			if err == syserror.EFAULT || err == syserror.EPERM {
-				t.Debugf("Unhandled user fault: addr=%x ip=%x access=%v err=%v", addr, t.Arch().IP(), at, err)
-			} else {
-				t.Warningf("Unhandled user fault: addr=%x ip=%x access=%v err=%v", addr, t.Arch().IP(), at, err)
-			}
+			// Faults are common, log only at debug level.
+			t.Debugf("Unhandled user fault: addr=%x ip=%x access=%v err=%v", addr, t.Arch().IP(), at, err)
 			t.DebugDumpState()
 
 			// Continue to signal handling.

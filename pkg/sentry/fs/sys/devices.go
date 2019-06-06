@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,18 +30,16 @@ type cpunum struct {
 	fsutil.InodeNoExtendedAttributes `state:"nosave"`
 	fsutil.InodeNoopRelease          `state:"nosave"`
 	fsutil.InodeNoopWriteOut         `state:"nosave"`
+	fsutil.InodeNotAllocatable       `state:"nosave"`
 	fsutil.InodeNotDirectory         `state:"nosave"`
 	fsutil.InodeNotMappable          `state:"nosave"`
 	fsutil.InodeNotSocket            `state:"nosave"`
 	fsutil.InodeNotSymlink           `state:"nosave"`
-	fsutil.InodeNotVirtual           `state:"nosave"`
 	fsutil.InodeNotTruncatable       `state:"nosave"`
+	fsutil.InodeNotVirtual           `state:"nosave"`
 
 	fsutil.InodeSimpleAttributes
 	fsutil.InodeStaticFileGetter
-
-	// k is the system kernel.
-	k *kernel.Kernel
 }
 
 var _ fs.InodeOperations = (*cpunum)(nil)

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,11 +45,13 @@ import (
 //
 // +stateify savable
 type SocketOperations struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 	refs.AtomicRefCount
 	socket.SendReceiveTimeout
 
@@ -383,6 +385,10 @@ func (s *SocketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 		}
 		defer ep.Release()
 		w.To = ep
+
+		if ep.Passcred() && w.Control.Credentials == nil {
+			w.Control.Credentials = control.MakeCreds(t)
+		}
 	}
 
 	n, err := src.CopyInTo(t, &w)
@@ -476,7 +482,7 @@ func (s *SocketOperations) Read(ctx context.Context, _ *fs.File, dst usermem.IOS
 
 // RecvMsg implements the linux syscall recvmsg(2) for sockets backed by
 // a transport.Endpoint.
-func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (n int, senderAddr interface{}, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
+func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (n int, msgFlags int, senderAddr interface{}, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
 	trunc := flags&linux.MSG_TRUNC != 0
 	peek := flags&linux.MSG_PEEK != 0
 	dontWait := flags&linux.MSG_DONTWAIT != 0
@@ -489,6 +495,9 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 	if s.Passcred() {
 		// Credentials take priority if they are enabled and there is space.
 		wantCreds = rightsLen > 0
+		if !wantCreds {
+			msgFlags |= linux.MSG_CTRUNC
+		}
 		credLen := syscall.CmsgSpace(syscall.SizeofUcred)
 		rightsLen -= credLen
 	}
@@ -511,14 +520,24 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 	if n, err := dst.CopyOutFrom(t, &r); err != syserror.ErrWouldBlock || dontWait {
 		var from interface{}
 		var fromLen uint32
-		if r.From != nil {
+		if r.From != nil && len([]byte(r.From.Addr)) != 0 {
 			from, fromLen = epsocket.ConvertAddress(linux.AF_UNIX, *r.From)
 		}
-		if trunc {
-			n = int64(r.MsgSize)
+
+		if r.ControlTrunc {
+			msgFlags |= linux.MSG_CTRUNC
 		}
+
 		if err != nil || dontWait || !waitAll || s.isPacket || n >= dst.NumBytes() {
-			return int(n), from, fromLen, socket.ControlMessages{Unix: r.Control}, syserr.FromError(err)
+			if s.isPacket && n < int64(r.MsgSize) {
+				msgFlags |= linux.MSG_TRUNC
+			}
+
+			if trunc {
+				n = int64(r.MsgSize)
+			}
+
+			return int(n), msgFlags, from, fromLen, socket.ControlMessages{Unix: r.Control}, syserr.FromError(err)
 		}
 
 		// Don't overwrite any data we received.
@@ -539,15 +558,26 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 			if r.From != nil {
 				from, fromLen = epsocket.ConvertAddress(linux.AF_UNIX, *r.From)
 			}
-			if trunc {
-				n = int64(r.MsgSize)
+
+			if r.ControlTrunc {
+				msgFlags |= linux.MSG_CTRUNC
 			}
-			total += n
+
+			if trunc {
+				// n and r.MsgSize are the same for streams.
+				total += int64(r.MsgSize)
+			} else {
+				total += n
+			}
+
 			if err != nil || !waitAll || s.isPacket || n >= dst.NumBytes() {
 				if total > 0 {
 					err = nil
 				}
-				return int(total), from, fromLen, socket.ControlMessages{Unix: r.Control}, syserr.FromError(err)
+				if s.isPacket && n < int64(r.MsgSize) {
+					msgFlags |= linux.MSG_TRUNC
+				}
+				return int(total), msgFlags, from, fromLen, socket.ControlMessages{Unix: r.Control}, syserr.FromError(err)
 			}
 
 			// Don't overwrite any data we received.
@@ -559,9 +589,9 @@ func (s *SocketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 				err = nil
 			}
 			if err == syserror.ETIMEDOUT {
-				return int(total), nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
+				return int(total), msgFlags, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
 			}
-			return int(total), nil, 0, socket.ControlMessages{}, syserr.FromError(err)
+			return int(total), msgFlags, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
 		}
 	}
 }
@@ -572,8 +602,8 @@ type provider struct{}
 // Socket returns a new unix domain socket.
 func (*provider) Socket(t *kernel.Task, stype transport.SockType, protocol int) (*fs.File, *syserr.Error) {
 	// Check arguments.
-	if protocol != 0 {
-		return nil, syserr.ErrInvalidArgument
+	if protocol != 0 && protocol != linux.AF_UNIX /* PF_UNIX */ {
+		return nil, syserr.ErrProtocolNotSupported
 	}
 
 	// Create the endpoint and socket.
@@ -598,8 +628,8 @@ func (*provider) Socket(t *kernel.Task, stype transport.SockType, protocol int) 
 // Pair creates a new pair of AF_UNIX connected sockets.
 func (*provider) Pair(t *kernel.Task, stype transport.SockType, protocol int) (*fs.File, *fs.File, *syserr.Error) {
 	// Check arguments.
-	if protocol != 0 {
-		return nil, nil, syserr.ErrInvalidArgument
+	if protocol != 0 && protocol != linux.AF_UNIX /* PF_UNIX */ {
+		return nil, nil, syserr.ErrProtocolNotSupported
 	}
 
 	var isPacket bool

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,11 @@ func (f *MemoryFile) SaveTo(w io.Writer) error {
 		f.mu.Unlock()
 		runtime.Gosched()
 		f.mu.Lock()
+	}
+
+	// Ensure that there are no pending evictions.
+	if len(f.evictable) != 0 {
+		panic(fmt.Sprintf("evictions still pending for %d users; call StartEvictions and WaitForEvictions before SaveTo", len(f.evictable)))
 	}
 
 	// Ensure that all pages that contain data have knownCommitted set, since

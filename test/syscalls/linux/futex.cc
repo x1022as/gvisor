@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@
 #include "test/util/temp_path.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
+#include "test/util/time_util.h"
 #include "test/util/timer_util.h"
 
 namespace gvisor {
@@ -503,8 +504,8 @@ TEST_P(PrivateAndSharedFutexTest, WakeWrongKind_NoRandomSave) {
   EXPECT_THAT(futex_wake(!IsPrivate(), &a, 1), SyscallSucceedsWithValue(0));
 }
 
-INSTANTIATE_TEST_CASE_P(SharedPrivate, PrivateAndSharedFutexTest,
-                        ::testing::Bool());
+INSTANTIATE_TEST_SUITE_P(SharedPrivate, PrivateAndSharedFutexTest,
+                         ::testing::Bool());
 
 // Passing null as the address only works for private futexes.
 

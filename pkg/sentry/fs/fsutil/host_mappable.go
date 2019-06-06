@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -149,7 +149,7 @@ func (h *HostMappable) Truncate(ctx context.Context, newSize int64) error {
 	}
 
 	// Invalidate COW mappings that may exist beyond the new size in case the file
-	// is being shrunk. Other mappinsg don't need to be invalidated because
+	// is being shrunk. Other mappings don't need to be invalidated because
 	// translate will just return identical mappings after invalidation anyway,
 	// and SIGBUS will be raised and handled when the mappings are touched.
 	//
@@ -165,6 +165,14 @@ func (h *HostMappable) Truncate(ctx context.Context, newSize int64) error {
 	h.mappings.Invalidate(mr, memmap.InvalidateOpts{InvalidatePrivate: true})
 
 	return nil
+}
+
+// Allocate reserves space in the backing file.
+func (h *HostMappable) Allocate(ctx context.Context, offset int64, length int64) error {
+	h.truncateMu.RLock()
+	err := h.backingFile.Allocate(ctx, offset, length)
+	h.truncateMu.RUnlock()
+	return err
 }
 
 // Write writes to the file backing this mappable.

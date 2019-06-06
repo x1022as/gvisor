@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -55,6 +55,11 @@ void spin_ns(int64_t ns) {
 
 // Test that CLOCK_PROCESS_CPUTIME_ID is a superset of CLOCK_THREAD_CPUTIME_ID.
 TEST(ClockGettime, CputimeId) {
+  // TODO(b/128871825,golang.org/issue/10958): Test times out when there is a
+  // small number of core because one goroutine starves the others.
+  printf("CPUS: %d\n", std::thread::hardware_concurrency());
+  SKIP_IF(std::thread::hardware_concurrency() <= 2);
+
   constexpr int kNumThreads = 13;  // arbitrary
 
   absl::Duration spin_time = absl::Seconds(1);
@@ -132,11 +137,11 @@ std::string PrintClockId(::testing::TestParamInfo<clockid_t> info) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(ClockGettime, MonotonicClockTest,
-                        ::testing::Values(CLOCK_MONOTONIC,
-                                          CLOCK_MONOTONIC_COARSE,
-                                          CLOCK_MONOTONIC_RAW),
-                        PrintClockId);
+INSTANTIATE_TEST_SUITE_P(ClockGettime, MonotonicClockTest,
+                         ::testing::Values(CLOCK_MONOTONIC,
+                                           CLOCK_MONOTONIC_COARSE,
+                                           CLOCK_MONOTONIC_RAW),
+                         PrintClockId);
 
 TEST(ClockGettime, UnimplementedReturnsEINVAL) {
   SKIP_IF(!IsRunningOnGvisor());

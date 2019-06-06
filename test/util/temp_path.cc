@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,10 @@
 #include "test/util/temp_path.h"
 
 #include <unistd.h>
+
 #include <atomic>
 #include <cstdlib>
+#include <iostream>
 
 #include "gtest/gtest.h"
 #include "absl/time/clock.h"
@@ -52,9 +54,9 @@ void TryDeleteRecursively(std::string const& path) {
     int undeleted_files = 0;
     auto status = RecursivelyDelete(path, &undeleted_dirs, &undeleted_files);
     if (undeleted_dirs || undeleted_files || !status.ok()) {
-      LOG(WARNING) << path << ": failed to delete " << undeleted_dirs
-                   << " directories and " << undeleted_files
-                   << " files: " << status;
+      std::cerr << path << ": failed to delete " << undeleted_dirs
+                << " directories and " << undeleted_files
+                << " files: " << status;
     }
   }
 }
@@ -83,7 +85,7 @@ PosixErrorOr<TempPath> TempPath::CreateFileWith(absl::string_view const parent,
                                                 absl::string_view const content,
                                                 mode_t const mode) {
   return CreateIn(parent, [=](absl::string_view path) -> PosixError {
-    // SetContents will call open(O_WRONLY) with the given mode. If the
+    // CreateWithContents will call open(O_WRONLY) with the given mode. If the
     // mode is not user-writable, save/restore cannot preserve the fd. Hence
     // the little permission dance that's done here.
     auto res = CreateWithContents(path, content, mode | 0200);

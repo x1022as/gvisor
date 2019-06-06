@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -130,7 +130,11 @@ type Endpoint interface {
 	//
 	// msgLen is the length of the read message consumed for datagram Endpoints.
 	// msgLen is always the same as recvLen for stream Endpoints.
-	RecvMsg(data [][]byte, creds bool, numRights uintptr, peek bool, addr *tcpip.FullAddress) (recvLen, msgLen uintptr, cm ControlMessages, err *syserr.Error)
+	//
+	// CMTruncated indicates that the numRights hint was used to receive fewer
+	// than the total available SCM_RIGHTS FDs. Additional truncation may be
+	// required by the caller.
+	RecvMsg(data [][]byte, creds bool, numRights uintptr, peek bool, addr *tcpip.FullAddress) (recvLen, msgLen uintptr, cm ControlMessages, CMTruncated bool, err *syserr.Error)
 
 	// SendMsg writes data and a control message to the endpoint's peer.
 	// This method does not block if the data cannot be written.
@@ -233,6 +237,10 @@ type BoundEndpoint interface {
 	// endpoint.
 	UnidirectionalConnect() (ConnectedEndpoint, *syserr.Error)
 
+	// Passcred returns whether or not the SO_PASSCRED socket option is
+	// enabled on this end.
+	Passcred() bool
+
 	// Release releases any resources held by the BoundEndpoint. It must be
 	// called before dropping all references to a BoundEndpoint returned by a
 	// function.
@@ -288,7 +296,7 @@ type Receiver interface {
 	// See Endpoint.RecvMsg for documentation on shared arguments.
 	//
 	// notify indicates if RecvNotify should be called.
-	Recv(data [][]byte, creds bool, numRights uintptr, peek bool) (recvLen, msgLen uintptr, cm ControlMessages, source tcpip.FullAddress, notify bool, err *syserr.Error)
+	Recv(data [][]byte, creds bool, numRights uintptr, peek bool) (recvLen, msgLen uintptr, cm ControlMessages, CMTruncated bool, source tcpip.FullAddress, notify bool, err *syserr.Error)
 
 	// RecvNotify notifies the Receiver of a successful Recv. This must not be
 	// called while holding any endpoint locks.
@@ -328,7 +336,7 @@ type queueReceiver struct {
 }
 
 // Recv implements Receiver.Recv.
-func (q *queueReceiver) Recv(data [][]byte, creds bool, numRights uintptr, peek bool) (uintptr, uintptr, ControlMessages, tcpip.FullAddress, bool, *syserr.Error) {
+func (q *queueReceiver) Recv(data [][]byte, creds bool, numRights uintptr, peek bool) (uintptr, uintptr, ControlMessages, bool, tcpip.FullAddress, bool, *syserr.Error) {
 	var m *message
 	var notify bool
 	var err *syserr.Error
@@ -338,7 +346,7 @@ func (q *queueReceiver) Recv(data [][]byte, creds bool, numRights uintptr, peek 
 		m, notify, err = q.readQueue.Dequeue()
 	}
 	if err != nil {
-		return 0, 0, ControlMessages{}, tcpip.FullAddress{}, false, err
+		return 0, 0, ControlMessages{}, false, tcpip.FullAddress{}, false, err
 	}
 	src := []byte(m.Data)
 	var copied uintptr
@@ -347,7 +355,7 @@ func (q *queueReceiver) Recv(data [][]byte, creds bool, numRights uintptr, peek 
 		copied += uintptr(n)
 		src = src[n:]
 	}
-	return copied, uintptr(len(m.Data)), m.Control, m.Address, notify, nil
+	return copied, uintptr(len(m.Data)), m.Control, false, m.Address, notify, nil
 }
 
 // RecvNotify implements Receiver.RecvNotify.
@@ -440,7 +448,7 @@ func (q *streamQueueReceiver) RecvMaxQueueSize() int64 {
 }
 
 // Recv implements Receiver.Recv.
-func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uintptr, peek bool) (uintptr, uintptr, ControlMessages, tcpip.FullAddress, bool, *syserr.Error) {
+func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uintptr, peek bool) (uintptr, uintptr, ControlMessages, bool, tcpip.FullAddress, bool, *syserr.Error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -453,7 +461,7 @@ func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uint
 		// the next time Recv() is called.
 		m, n, err := q.readQueue.Dequeue()
 		if err != nil {
-			return 0, 0, ControlMessages{}, tcpip.FullAddress{}, false, err
+			return 0, 0, ControlMessages{}, false, tcpip.FullAddress{}, false, err
 		}
 		notify = n
 		q.buffer = []byte(m.Data)
@@ -469,7 +477,7 @@ func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uint
 		// Don't consume data since we are peeking.
 		copied, data, _ = vecCopy(data, q.buffer)
 
-		return copied, copied, c, q.addr, notify, nil
+		return copied, copied, c, false, q.addr, notify, nil
 	}
 
 	// Consume data and control message since we are not peeking.
@@ -484,9 +492,11 @@ func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uint
 		c.Credentials = nil
 	}
 
+	var cmTruncated bool
 	if c.Rights != nil && numRights == 0 {
 		c.Rights.Release()
 		c.Rights = nil
+		cmTruncated = true
 	}
 
 	haveRights := c.Rights != nil
@@ -538,6 +548,7 @@ func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uint
 		if q.control.Rights != nil {
 			// Consume rights.
 			if numRights == 0 {
+				cmTruncated = true
 				q.control.Rights.Release()
 			} else {
 				c.Rights = q.control.Rights
@@ -546,7 +557,7 @@ func (q *streamQueueReceiver) Recv(data [][]byte, wantCreds bool, numRights uint
 			q.control.Rights = nil
 		}
 	}
-	return copied, copied, c, q.addr, notify, nil
+	return copied, copied, c, cmTruncated, q.addr, notify, nil
 }
 
 // A ConnectedEndpoint is an Endpoint that can be used to send Messages.
@@ -775,18 +786,18 @@ func (e *baseEndpoint) Connected() bool {
 }
 
 // RecvMsg reads data and a control message from the endpoint.
-func (e *baseEndpoint) RecvMsg(data [][]byte, creds bool, numRights uintptr, peek bool, addr *tcpip.FullAddress) (uintptr, uintptr, ControlMessages, *syserr.Error) {
+func (e *baseEndpoint) RecvMsg(data [][]byte, creds bool, numRights uintptr, peek bool, addr *tcpip.FullAddress) (uintptr, uintptr, ControlMessages, bool, *syserr.Error) {
 	e.Lock()
 
 	if e.receiver == nil {
 		e.Unlock()
-		return 0, 0, ControlMessages{}, syserr.ErrNotConnected
+		return 0, 0, ControlMessages{}, false, syserr.ErrNotConnected
 	}
 
-	recvLen, msgLen, cms, a, notify, err := e.receiver.Recv(data, creds, numRights, peek)
+	recvLen, msgLen, cms, cmt, a, notify, err := e.receiver.Recv(data, creds, numRights, peek)
 	e.Unlock()
 	if err != nil {
-		return 0, 0, ControlMessages{}, err
+		return 0, 0, ControlMessages{}, false, err
 	}
 
 	if notify {
@@ -796,7 +807,7 @@ func (e *baseEndpoint) RecvMsg(data [][]byte, creds bool, numRights uintptr, pee
 	if addr != nil {
 		*addr = a
 	}
-	return recvLen, msgLen, cms, nil
+	return recvLen, msgLen, cms, cmt, nil
 }
 
 // SendMsg writes data and a control message to the endpoint's peer.

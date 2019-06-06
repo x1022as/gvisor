@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.googlesource.com/gvisor/pkg/unet"
 )
+
+// DefaultDirentCacheSize is the default dirent cache size for 9P mounts. It can
+// be adjusted independentely from the other dirent caches.
+var DefaultDirentCacheSize uint64 = fs.DefaultDirentCacheSize
 
 // +stateify savable
 type endpointMaps struct {
@@ -97,7 +101,7 @@ type session struct {
 	// version is the value of the version mount option, see fs/gofer/fs.go.
 	version string `state:"wait"`
 
-	// cachePolicy is the cache policy. It may be either cacheAll or cacheNone.
+	// cachePolicy is the cache policy.
 	cachePolicy cachePolicy `state:"wait"`
 
 	// aname is the value of the aname mount option, see fs/gofer/fs.go.
@@ -130,7 +134,7 @@ type session struct {
 	// socket files. This allows unix domain sockets to be used with paths that
 	// belong to a gofer.
 	//
-	// TODO: there are few possible races with someone stat'ing the
+	// TODO(b/77154739): there are few possible races with someone stat'ing the
 	// file and another deleting it concurrently, where the file will not be
 	// reported as socket file.
 	endpoints *endpointMaps `state:"wait"`
@@ -248,6 +252,11 @@ func Root(ctx context.Context, dev string, filesystem fs.Filesystem, superBlockF
 
 	// Construct the MountSource with the session and superBlockFlags.
 	m := fs.NewMountSource(s, filesystem, superBlockFlags)
+
+	// Given that gofer files can consume host FDs, restrict the number
+	// of files that can be held by the cache.
+	m.SetDirentCacheMaxSize(DefaultDirentCacheSize)
+	m.SetDirentCacheLimiter(fs.DirentCacheLimiterFromContext(ctx))
 
 	// Send the Tversion request.
 	s.client, err = p9.NewClient(conn, s.msize, s.version)

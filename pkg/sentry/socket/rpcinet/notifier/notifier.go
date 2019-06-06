@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func NewRPCNotifier(cn *conn.RPCConnection) (*Notifier, error) {
 		fdMap:   make(map[uint32]*fdInfo),
 	}
 
-	go w.waitAndNotify() // S/R-FIXME
+	go w.waitAndNotify() // S/R-FIXME(b/77962828)
 
 	return w, nil
 }
@@ -76,7 +76,7 @@ func (n *Notifier) waitFD(fd uint32, fi *fdInfo, mask waiter.EventMask) error {
 	}
 
 	e := pb.EpollEvent{
-		Events: uint32(mask) | -syscall.EPOLLET,
+		Events: mask.ToLinux() | -syscall.EPOLLET,
 		Fd:     fd,
 	}
 
@@ -166,7 +166,7 @@ func (n *Notifier) waitAndNotify() error {
 		res := n.rpcConn.Request(id).Result.(*pb.SyscallResponse_EpollWait).EpollWait.Result
 		if e, ok := res.(*pb.EpollWaitResponse_ErrorNumber); ok {
 			err := syscall.Errno(e.ErrorNumber)
-			// NOTE: I don't think epoll_wait can return EAGAIN but I'm being
+			// NOTE(magi): I don't think epoll_wait can return EAGAIN but I'm being
 			// conseratively careful here since exiting the notification thread
 			// would be really bad.
 			if err == syscall.EINTR || err == syscall.EAGAIN {
@@ -178,7 +178,7 @@ func (n *Notifier) waitAndNotify() error {
 		n.mu.Lock()
 		for _, e := range res.(*pb.EpollWaitResponse_Events).Events.Events {
 			if fi, ok := n.fdMap[e.Fd]; ok {
-				fi.queue.Notify(waiter.EventMask(e.Events))
+				fi.queue.Notify(waiter.EventMaskFromLinux(e.Events))
 			}
 		}
 		n.mu.Unlock()
@@ -214,7 +214,7 @@ func (n *Notifier) HasFD(fd uint32) bool {
 // although the syscall is non-blocking.
 func (n *Notifier) NonBlockingPoll(fd uint32, mask waiter.EventMask) waiter.EventMask {
 	for {
-		id, c := n.rpcConn.NewRequest(pb.SyscallRequest{Args: &pb.SyscallRequest_Poll{&pb.PollRequest{Fd: fd, Events: uint32(mask)}}}, false /* ignoreResult */)
+		id, c := n.rpcConn.NewRequest(pb.SyscallRequest{Args: &pb.SyscallRequest_Poll{&pb.PollRequest{Fd: fd, Events: mask.ToLinux()}}}, false /* ignoreResult */)
 		<-c
 
 		res := n.rpcConn.Request(id).Result.(*pb.SyscallResponse_Poll).Poll.Result
@@ -225,6 +225,6 @@ func (n *Notifier) NonBlockingPoll(fd uint32, mask waiter.EventMask) waiter.Even
 			return mask
 		}
 
-		return waiter.EventMask(res.(*pb.PollResponse_Events).Events)
+		return waiter.EventMaskFromLinux(res.(*pb.PollResponse_Events).Events)
 	}
 }

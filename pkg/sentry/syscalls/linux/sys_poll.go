@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,11 @@ import (
 
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/kdefs"
 	ktime "gvisor.googlesource.com/gvisor/pkg/sentry/kernel/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/limits"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/syscalls"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 	"gvisor.googlesource.com/gvisor/pkg/waiter"
@@ -37,27 +37,144 @@ const fileCap = 1024 * 1024
 const (
 	// selectReadEvents is analogous to the Linux kernel's
 	// fs/select.c:POLLIN_SET.
-	selectReadEvents = waiter.EventIn | waiter.EventHUp | waiter.EventErr
+	selectReadEvents = linux.POLLIN | linux.POLLHUP | linux.POLLERR
 
 	// selectWriteEvents is analogous to the Linux kernel's
 	// fs/select.c:POLLOUT_SET.
-	selectWriteEvents = waiter.EventOut | waiter.EventErr
+	selectWriteEvents = linux.POLLOUT | linux.POLLERR
 
 	// selectExceptEvents is analogous to the Linux kernel's
 	// fs/select.c:POLLEX_SET.
-	selectExceptEvents = waiter.EventPri
+	selectExceptEvents = linux.POLLPRI
 )
 
-func doPoll(t *kernel.Task, pfdAddr usermem.Addr, nfds uint, timeout time.Duration) (time.Duration, uintptr, error) {
-	if uint64(nfds) > t.ThreadGroup().Limits().GetCapped(limits.NumberOfFiles, fileCap) {
-		return timeout, 0, syserror.EINVAL
+// pollState tracks the associated file descriptor and waiter of a PollFD.
+type pollState struct {
+	file   *fs.File
+	waiter waiter.Entry
+}
+
+// initReadiness gets the current ready mask for the file represented by the FD
+// stored in pfd.FD. If a channel is passed in, the waiter entry in "state" is
+// used to register with the file for event notifications, and a reference to
+// the file is stored in "state".
+func initReadiness(t *kernel.Task, pfd *linux.PollFD, state *pollState, ch chan struct{}) {
+	if pfd.FD < 0 {
+		pfd.REvents = 0
+		return
 	}
 
-	pfd := make([]syscalls.PollFD, nfds)
-	if nfds > 0 {
-		if _, err := t.CopyIn(pfdAddr, &pfd); err != nil {
+	file := t.FDMap().GetFile(kdefs.FD(pfd.FD))
+	if file == nil {
+		pfd.REvents = linux.POLLNVAL
+		return
+	}
+
+	if ch == nil {
+		defer file.DecRef()
+	} else {
+		state.file = file
+		state.waiter, _ = waiter.NewChannelEntry(ch)
+		file.EventRegister(&state.waiter, waiter.EventMaskFromLinux(uint32(pfd.Events)))
+	}
+
+	r := file.Readiness(waiter.EventMaskFromLinux(uint32(pfd.Events)))
+	pfd.REvents = int16(r.ToLinux()) & pfd.Events
+}
+
+// releaseState releases all the pollState in "state".
+func releaseState(state []pollState) {
+	for i := range state {
+		if state[i].file != nil {
+			state[i].file.EventUnregister(&state[i].waiter)
+			state[i].file.DecRef()
+		}
+	}
+}
+
+// pollBlock polls the PollFDs in "pfd" with a bounded time specified in "timeout"
+// when "timeout" is greater than zero.
+//
+// pollBlock returns the remaining timeout, which is always 0 on a timeout; and 0 or
+// positive if interrupted by a signal.
+func pollBlock(t *kernel.Task, pfd []linux.PollFD, timeout time.Duration) (time.Duration, uintptr, error) {
+	var ch chan struct{}
+	if timeout != 0 {
+		ch = make(chan struct{}, 1)
+	}
+
+	// Register for event notification in the files involved if we may
+	// block (timeout not zero). Once we find a file that has a non-zero
+	// result, we stop registering for events but still go through all files
+	// to get their ready masks.
+	state := make([]pollState, len(pfd))
+	defer releaseState(state)
+	n := uintptr(0)
+	for i := range pfd {
+		initReadiness(t, &pfd[i], &state[i], ch)
+		if pfd[i].REvents != 0 {
+			n++
+			ch = nil
+		}
+	}
+
+	if timeout == 0 {
+		return timeout, n, nil
+	}
+
+	forever := timeout < 0
+
+	for n == 0 {
+		var err error
+		// Wait for a notification.
+		timeout, err = t.BlockWithTimeout(ch, !forever, timeout)
+		if err != nil {
+			if err == syserror.ETIMEDOUT {
+				err = nil
+			}
 			return timeout, 0, err
 		}
+
+		// We got notified, count how many files are ready. If none,
+		// then this was a spurious notification, and we just go back
+		// to sleep with the remaining timeout.
+		for i := range state {
+			if state[i].file == nil {
+				continue
+			}
+
+			r := state[i].file.Readiness(waiter.EventMaskFromLinux(uint32(pfd[i].Events)))
+			rl := int16(r.ToLinux()) & pfd[i].Events
+			if rl != 0 {
+				pfd[i].REvents = rl
+				n++
+			}
+		}
+	}
+
+	return timeout, n, nil
+}
+
+// CopyInPollFDs copies an array of struct pollfd unless nfds exceeds the max.
+func CopyInPollFDs(t *kernel.Task, addr usermem.Addr, nfds uint) ([]linux.PollFD, error) {
+	if uint64(nfds) > t.ThreadGroup().Limits().GetCapped(limits.NumberOfFiles, fileCap) {
+		return nil, syserror.EINVAL
+	}
+
+	pfd := make([]linux.PollFD, nfds)
+	if nfds > 0 {
+		if _, err := t.CopyIn(addr, &pfd); err != nil {
+			return nil, err
+		}
+	}
+
+	return pfd, nil
+}
+
+func doPoll(t *kernel.Task, addr usermem.Addr, nfds uint, timeout time.Duration) (time.Duration, uintptr, error) {
+	pfd, err := CopyInPollFDs(t, addr, nfds)
+	if err != nil {
+		return timeout, 0, err
 	}
 
 	// Compatibility warning: Linux adds POLLHUP and POLLERR just before
@@ -65,15 +182,15 @@ func doPoll(t *kernel.Task, pfdAddr usermem.Addr, nfds uint, timeout time.Durati
 	// polling, changing event masks here is an application-visible difference.
 	// (Linux also doesn't copy out event masks at all, only revents.)
 	for i := range pfd {
-		pfd[i].Events |= waiter.EventHUp | waiter.EventErr
+		pfd[i].Events |= linux.POLLHUP | linux.POLLERR
 	}
-	remainingTimeout, n, err := syscalls.Poll(t, pfd, timeout)
+	remainingTimeout, n, err := pollBlock(t, pfd, timeout)
 	err = syserror.ConvertIntr(err, syserror.EINTR)
 
 	// The poll entries are copied out regardless of whether
 	// any are set or not. This aligns with the Linux behavior.
 	if nfds > 0 && err == nil {
-		if _, err := t.CopyOut(pfdAddr, pfd); err != nil {
+		if _, err := t.CopyOut(addr, pfd); err != nil {
 			return remainingTimeout, 0, err
 		}
 	}
@@ -136,8 +253,8 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 	}
 
 	// Build the PollFD array.
-	pfd := make([]syscalls.PollFD, 0, fdCount)
-	fd := kdefs.FD(0)
+	pfd := make([]linux.PollFD, 0, fdCount)
+	var fd int32
 	for i := 0; i < byteCount; i++ {
 		rV, wV, eV := r[i], w[i], e[i]
 		v := rV | wV | eV
@@ -148,13 +265,13 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 				// immediately to ensure we don't leak. Note, another thread
 				// might be about to close fd. This is racy, but that's
 				// OK. Linux is racy in the same way.
-				file := t.FDMap().GetFile(fd)
+				file := t.FDMap().GetFile(kdefs.FD(fd))
 				if file == nil {
 					return 0, syserror.EBADF
 				}
 				file.DecRef()
 
-				mask := waiter.EventMask(0)
+				var mask int16
 				if (rV & m) != 0 {
 					mask |= selectReadEvents
 				}
@@ -167,7 +284,7 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 					mask |= selectExceptEvents
 				}
 
-				pfd = append(pfd, syscalls.PollFD{
+				pfd = append(pfd, linux.PollFD{
 					FD:     fd,
 					Events: mask,
 				})
@@ -179,7 +296,7 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 	}
 
 	// Do the syscall, then count the number of bits set.
-	_, _, err := syscalls.Poll(t, pfd, timeout)
+	_, _, err := pollBlock(t, pfd, timeout)
 	if err != nil {
 		return 0, syserror.ConvertIntr(err, syserror.EINTR)
 	}

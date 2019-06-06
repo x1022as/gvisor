@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -89,6 +89,10 @@ type File interface {
 	// On the server, SetAttr has a write concurrency guarantee.
 	SetAttr(valid SetAttrMask, attr SetAttr) error
 
+	// Allocate allows the caller to directly manipulate the allocated disk space
+	// for the file. See fallocate(2) for more details.
+	Allocate(mode AllocateMode, offset, length uint64) error
+
 	// Close is called when all references are dropped on the server side,
 	// and Close should be called by the client to drop all references.
 	//
@@ -166,7 +170,7 @@ type File interface {
 	// Mknod makes a new device node.
 	//
 	// On the server, Mknod has a write concurrency guarantee.
-	Mknod(name string, permissions FileMode, major uint32, minor uint32, uid UID, gid GID) (QID, error)
+	Mknod(name string, mode FileMode, major uint32, minor uint32, uid UID, gid GID) (QID, error)
 
 	// Rename renames the file.
 	//

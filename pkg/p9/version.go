@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ const (
 	//
 	// Clients are expected to start requesting this version number and
 	// to continuously decrement it until a Tversion request succeeds.
-	highestSupportedVersion uint32 = 6
+	highestSupportedVersion uint32 = 7
 
 	// lowestSupportedVersion is the lowest supported version X in a
 	// version string of the format 9P2000.L.Google.X.
@@ -142,4 +142,9 @@ func VersionSupportsAnonymous(v uint32) bool {
 // directory permissions and ID values.
 func VersionSupportsMultiUser(v uint32) bool {
 	return v >= 6
+}
+
+// versionSupportsTallocate returns true if version v supports Allocate().
+func versionSupportsTallocate(v uint32) bool {
+	return v >= 7
 }

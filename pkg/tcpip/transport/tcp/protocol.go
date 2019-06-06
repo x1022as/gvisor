@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/header"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/seqnum"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/stack"
+	"gvisor.googlesource.com/gvisor/pkg/tcpip/transport/raw"
 	"gvisor.googlesource.com/gvisor/pkg/waiter"
 )
 
@@ -47,6 +48,10 @@ const (
 
 	// MaxBufferSize is the largest size a receive and send buffer can grow to.
 	maxBufferSize = 4 << 20 // 4MB
+
+	// MaxUnprocessedSegments is the maximum number of unprocessed segments
+	// that can be queued for a given endpoint.
+	MaxUnprocessedSegments = 300
 )
 
 // SACKEnabled option can be used to enable SACK support in the TCP
@@ -104,7 +109,7 @@ func (*protocol) NewEndpoint(stack *stack.Stack, netProto tcpip.NetworkProtocolN
 // NewRawEndpoint creates a new raw TCP endpoint. Raw TCP sockets are currently
 // unsupported. It implements stack.TransportProtocol.NewRawEndpoint.
 func (p *protocol) NewRawEndpoint(stack *stack.Stack, netProto tcpip.NetworkProtocolNumber, waiterQueue *waiter.Queue) (tcpip.Endpoint, *tcpip.Error) {
-	return nil, tcpip.ErrUnknownProtocol
+	return raw.NewEndpoint(stack, netProto, header.TCPProtocolNumber, waiterQueue)
 }
 
 // MinimumPacketSize returns the minimum valid tcp packet size.
@@ -130,7 +135,7 @@ func (*protocol) HandleUnknownDestinationPacket(r *stack.Route, id stack.Transpo
 	s := newSegment(r, id, vv)
 	defer s.decRef()
 
-	if !s.parse() {
+	if !s.parse() || !s.csumValid {
 		return false
 	}
 

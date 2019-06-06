@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,8 +36,10 @@ import (
 //
 // +stateify savable
 type fileOperations struct {
-	fsutil.FileNoIoctl     `state:"nosave"`
-	fsutil.FileNoopRelease `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosplice"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	// iops are the Inode operations for this file.
 	iops *inodeOperations `state:"wait"`
@@ -166,7 +168,9 @@ func (f *fileOperations) Readiness(mask waiter.EventMask) waiter.EventMask {
 // Readdir implements fs.FileOperations.Readdir.
 func (f *fileOperations) Readdir(ctx context.Context, file *fs.File, serializer fs.DentrySerializer) (int64, error) {
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
+	if root != nil {
+		defer root.DecRef()
+	}
 	dirCtx := &fs.DirCtx{
 		Serializer: serializer,
 		DirCursor:  &f.dirCursor,

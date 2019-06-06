@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -448,19 +448,7 @@ TEST_P(AllSocketPairTest, UnboundSenderAddr) {
       RetryEINTR(recvfrom)(accepted_fd.get(), &i, sizeof(i), 0,
                            reinterpret_cast<sockaddr*>(&addr), &addr_len),
       SyscallSucceedsWithValue(sizeof(i)));
-  if (!IsRunningOnGvisor()) {
-    // Linux returns a zero length for addresses from recvfrom(2) and
-    // recvmsg(2). This differs from the behavior of getpeername(2) and
-    // getsockname(2). For simplicity, we use the getpeername(2) and
-    // getsockname(2) behavior for recvfrom(2) and recvmsg(2).
-    EXPECT_EQ(addr_len, 0);
-    return;
-  }
-  EXPECT_EQ(addr_len, 2);
-  EXPECT_EQ(
-      memcmp(&addr, sockets->second_addr(),
-             std::min((size_t)addr_len, (size_t)sockets->second_addr_len())),
-      0);
+  EXPECT_EQ(addr_len, 0);
 }
 
 TEST_P(AllSocketPairTest, BoundSenderAddr) {
@@ -580,7 +568,7 @@ TEST_P(AllSocketPairTest, BindAfterAcceptSenderAddr) {
       0);
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     AllUnixDomainSockets, AllSocketPairTest,
     ::testing::ValuesIn(VecCat<SocketPairKind>(
         ApplyVec<SocketPairKind>(

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -111,6 +111,12 @@ type MemoryManager struct {
 	// lockedAS is protected by mappingMu.
 	lockedAS uint64
 
+	// dataAS is the size of private data segments, like mm_struct->data_vm.
+	// It means the vma which is private, writable, not stack.
+	//
+	// dataAS is protected by mappingMu.
+	dataAS uint64
+
 	// New VMAs created by MMap use whichever of memmap.MMapOpts.MLockMode or
 	// defMLockMode is greater.
 	//
@@ -212,6 +218,12 @@ type MemoryManager struct {
 	//
 	// executable is protected by metadataMu.
 	executable *fs.Dirent
+
+	// dumpability describes if and how this MemoryManager may be dumped to
+	// userspace.
+	//
+	// dumpability is protected by metadataMu.
+	dumpability Dumpability
 
 	// aioManager keeps track of AIOContexts used for async IOs. AIOManager
 	// must be cloned when CLONE_VM is used.

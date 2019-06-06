@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ class ReadvSocketTest : public SocketTest {
     ASSERT_THAT(write(test_unix_seqpacket_socket_[1], kReadvTestData,
                       kReadvTestDataSize),
                 SyscallSucceedsWithValue(kReadvTestDataSize));
-    // FIXME: Enable when possible.
+    // FIXME(b/69821513): Enable when possible.
     // ASSERT_THAT(write(test_tcp_socket_[1], kReadvTestData,
     // kReadvTestDataSize),
     //             SyscallSucceedsWithValue(kReadvTestDataSize));

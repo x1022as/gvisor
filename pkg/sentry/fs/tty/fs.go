@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ func (*filesystem) Name() string {
 
 // AllowUserMount allows users to mount(2) this file system.
 func (*filesystem) AllowUserMount() bool {
-	// TODO: Users may mount this once the terminals are in a
+	// TODO(b/29356795): Users may mount this once the terminals are in a
 	// usable state.
 	return false
 }

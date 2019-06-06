@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,7 +62,6 @@ func NewMockMountSource(cache *DirentCache) *MountSource {
 	return &MountSource{
 		MountSourceOperations: &MockMountSourceOps{keep: keep},
 		fscache:               cache,
-		children:              make(map[*MountSource]struct{}),
 	}
 }
 
@@ -132,7 +131,7 @@ func (n *MockInodeOperations) CreateDirectory(context.Context, *Inode, string, F
 }
 
 // Rename implements fs.InodeOperations.Rename.
-func (n *MockInodeOperations) Rename(ctx context.Context, oldParent *Inode, oldName string, newParent *Inode, newName string, replacement bool) error {
+func (n *MockInodeOperations) Rename(ctx context.Context, inode *Inode, oldParent *Inode, oldName string, newParent *Inode, newName string, replacement bool) error {
 	n.renameCalled = true
 	return nil
 }
@@ -147,6 +146,11 @@ func (n *MockInodeOperations) Release(context.Context) {}
 
 // Truncate implements fs.InodeOperations.Truncate.
 func (n *MockInodeOperations) Truncate(ctx context.Context, inode *Inode, size int64) error {
+	return nil
+}
+
+// Allocate implements fs.InodeOperations.Allocate.
+func (n *MockInodeOperations) Allocate(ctx context.Context, inode *Inode, offset, length int64) error {
 	return nil
 }
 

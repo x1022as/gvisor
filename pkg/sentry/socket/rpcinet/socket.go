@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,11 +45,13 @@ import (
 // socketOperations implements fs.FileOperations and socket.Socket for a socket
 // implemented using a host socket.
 type socketOperations struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 	socket.SendReceiveTimeout
 
 	family   int    // Read-only.
@@ -287,7 +289,7 @@ func (s *socketOperations) Accept(t *kernel.Task, peerRequested bool, flags int,
 	if blocking && se == syserr.ErrTryAgain {
 		// Register for notifications.
 		e, ch := waiter.NewChannelEntry(nil)
-		// FIXME: This waiter.EventHUp is a partial
+		// FIXME(b/119878986): This waiter.EventHUp is a partial
 		// measure, need to figure out how to translate linux events to
 		// internal events.
 		s.EventRegister(&e, waiter.EventIn|waiter.EventHUp)
@@ -369,7 +371,7 @@ func (s *socketOperations) Shutdown(t *kernel.Task, how int) *syserr.Error {
 	// We save the shutdown state because of strange differences on linux
 	// related to recvs on blocking vs. non-blocking sockets after a SHUT_RD.
 	// We need to emulate that behavior on the blocking side.
-	// TODO: There is a possible race that can exist with loopback,
+	// TODO(b/120096741): There is a possible race that can exist with loopback,
 	// where data could possibly be lost.
 	s.setShutdownFlags(how)
 
@@ -672,7 +674,7 @@ func (s *socketOperations) extractControlMessages(payload *pb.RecvmsgResponse_Re
 }
 
 // RecvMsg implements socket.Socket.RecvMsg.
-func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
+func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (int, int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
 	req := &pb.SyscallRequest_Recvmsg{&pb.RecvmsgRequest{
 		Fd:         s.fd,
 		Length:     uint32(dst.NumBytes()),
@@ -693,10 +695,10 @@ func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 			}
 		}
 		c := s.extractControlMessages(res)
-		return int(res.Length), res.Address.GetAddress(), res.Address.GetLength(), c, syserr.FromError(e)
+		return int(res.Length), 0, res.Address.GetAddress(), res.Address.GetLength(), c, syserr.FromError(e)
 	}
 	if err != syserr.ErrWouldBlock && err != syserr.ErrTryAgain || flags&linux.MSG_DONTWAIT != 0 {
-		return 0, nil, 0, socket.ControlMessages{}, err
+		return 0, 0, nil, 0, socket.ControlMessages{}, err
 	}
 
 	// We'll have to block. Register for notifications and keep trying to
@@ -717,23 +719,23 @@ func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 				}
 			}
 			c := s.extractControlMessages(res)
-			return int(res.Length), res.Address.GetAddress(), res.Address.GetLength(), c, syserr.FromError(e)
+			return int(res.Length), 0, res.Address.GetAddress(), res.Address.GetLength(), c, syserr.FromError(e)
 		}
 		if err != syserr.ErrWouldBlock && err != syserr.ErrTryAgain {
-			return 0, nil, 0, socket.ControlMessages{}, err
+			return 0, 0, nil, 0, socket.ControlMessages{}, err
 		}
 
 		if s.isShutRdSet() {
 			// Blocking would have caused us to block indefinitely so we return 0,
 			// this is the same behavior as Linux.
-			return 0, nil, 0, socket.ControlMessages{}, nil
+			return 0, 0, nil, 0, socket.ControlMessages{}, nil
 		}
 
 		if err := t.BlockWithDeadline(ch, haveDeadline, deadline); err != nil {
 			if err == syserror.ETIMEDOUT {
-				return 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
+				return 0, 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
 			}
-			return 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
+			return 0, 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
 		}
 	}
 }
@@ -770,7 +772,7 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 		return 0, syserr.FromError(err)
 	}
 
-	// TODO: this needs to change to map directly to a SendMsg syscall
+	// TODO(bgeffon): this needs to change to map directly to a SendMsg syscall
 	// in the RPC.
 	totalWritten := 0
 	n, err := rpcSendMsg(t, &pb.SyscallRequest_Sendmsg{&pb.SendmsgRequest{

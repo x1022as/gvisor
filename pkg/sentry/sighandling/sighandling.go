@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -86,7 +86,7 @@ func handleSignals(sigchans []chan os.Signal, handler func(linux.Signal), start,
 			//
 			// Otherwise ignore the signal.
 			//
-			// TODO: Drop in Go 1.12, which uses tgkill
+			// TODO(b/114489875): Drop in Go 1.12, which uses tgkill
 			// in runtime.raise.
 			switch signal {
 			case linux.SIGHUP, linux.SIGINT, linux.SIGTERM:

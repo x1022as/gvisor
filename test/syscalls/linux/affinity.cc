@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -121,8 +121,7 @@ TEST_F(AffinityTest, SchedSetAffinityOnlyNonexistentCPUFails) {
   // it's implicitly returned by raw sched_getaffinity syscall.
   int cpu = cpuset_size_ * 8 - 1;
   if (cpu <= NumCPUs()) {
-    LOG(INFO) << "Skipping test: cpu " << cpu << " exists";
-    return;
+    GTEST_SKIP() << "Skipping test: cpu " << cpu << " exists";
   }
   CPU_SET(cpu, &mask_);
   EXPECT_THAT(

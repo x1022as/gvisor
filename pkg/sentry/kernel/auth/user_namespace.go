@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ type UserNamespace struct {
 	gidMapFromParent idMapSet
 	gidMapToParent   idMapSet
 
-	// TODO: Support disabling setgroups(2).
+	// TODO(b/27454212): Support disabling setgroups(2).
 }
 
 // NewRootUserNamespace returns a UserNamespace that is appropriate for a

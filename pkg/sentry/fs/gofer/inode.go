@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -322,6 +322,15 @@ func (i *inodeFileState) unstableAttr(ctx context.Context) (fs.UnstableAttr, err
 	return unstable(ctx, valid, pattr, i.s.mounter, i.s.client), nil
 }
 
+func (i *inodeFileState) Allocate(ctx context.Context, offset, length int64) error {
+	i.handlesMu.RLock()
+	defer i.handlesMu.RUnlock()
+
+	// No options are supported for now.
+	mode := p9.AllocateMode{}
+	return i.writeHandles.File.allocate(ctx, mode, uint64(offset), uint64(length))
+}
+
 // session extracts the gofer's session from the MountSource.
 func (i *inodeOperations) session() *session {
 	return i.fileState.s
@@ -498,6 +507,21 @@ func (i *inodeOperations) Truncate(ctx context.Context, inode *fs.Inode, length 
 	return i.fileState.file.setAttr(ctx, p9.SetAttrMask{Size: true}, p9.SetAttr{Size: uint64(length)})
 }
 
+// Allocate implements fs.InodeOperations.Allocate.
+func (i *inodeOperations) Allocate(ctx context.Context, inode *fs.Inode, offset, length int64) error {
+	// This can only be called for files anyway.
+	if i.session().cachePolicy.useCachingInodeOps(inode) {
+		return i.cachingInodeOps.Allocate(ctx, offset, length)
+	}
+	if i.session().cachePolicy == cacheRemoteRevalidating {
+		return i.fileState.hostMappable.Allocate(ctx, offset, length)
+	}
+
+	// No options are supported for now.
+	mode := p9.AllocateMode{}
+	return i.fileState.file.allocate(ctx, mode, uint64(offset), uint64(length))
+}
+
 // WriteOut implements fs.InodeOperations.WriteOut.
 func (i *inodeOperations) WriteOut(ctx context.Context, inode *fs.Inode) error {
 	if !i.session().cachePolicy.cacheUAttrs(inode) {
@@ -570,13 +594,13 @@ func init() {
 }
 
 // AddLink implements InodeOperations.AddLink, but is currently a noop.
-// FIXME: Remove this from InodeOperations altogether.
+// FIXME(b/63117438): Remove this from InodeOperations altogether.
 func (*inodeOperations) AddLink() {}
 
 // DropLink implements InodeOperations.DropLink, but is currently a noop.
-// FIXME: Remove this from InodeOperations altogether.
+// FIXME(b/63117438): Remove this from InodeOperations altogether.
 func (*inodeOperations) DropLink() {}
 
 // NotifyStatusChange implements fs.InodeOperations.NotifyStatusChange.
-// FIXME: Remove this from InodeOperations altogether.
+// FIXME(b/63117438): Remove this from InodeOperations altogether.
 func (i *inodeOperations) NotifyStatusChange(ctx context.Context) {}

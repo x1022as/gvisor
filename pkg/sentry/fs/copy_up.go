@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -113,13 +113,13 @@ func copyUpLockedForRename(ctx context.Context, d *Dirent) error {
 		// Did we race with another copy up or does there
 		// already exist something in the upper filesystem
 		// for d?
-		d.Inode.overlay.copyMu.Lock()
+		d.Inode.overlay.copyMu.RLock()
 		if d.Inode.overlay.upper != nil {
-			d.Inode.overlay.copyMu.Unlock()
+			d.Inode.overlay.copyMu.RUnlock()
 			// Done, d is in the upper filesystem.
 			return nil
 		}
-		d.Inode.overlay.copyMu.Unlock()
+		d.Inode.overlay.copyMu.RUnlock()
 
 		// Find the next component to copy up. We will work our way
 		// down to the last component of d and finally copy it.
@@ -155,6 +155,14 @@ func findNextCopyUp(ctx context.Context, d *Dirent) *Dirent {
 }
 
 func doCopyUp(ctx context.Context, d *Dirent) error {
+	// Fail fast on Inode types we won't be able to copy up anyways. These
+	// Inodes may block in GetFile while holding copyMu for reading. If we
+	// then try to take copyMu for writing here, we'd deadlock.
+	t := d.Inode.overlay.lower.StableAttr.Type
+	if t != RegularFile && t != Directory && t != Symlink {
+		return syserror.EINVAL
+	}
+
 	// Wait to get exclusive access to the upper Inode.
 	d.Inode.overlay.copyMu.Lock()
 	defer d.Inode.overlay.copyMu.Unlock()
@@ -177,6 +185,8 @@ func doCopyUp(ctx context.Context, d *Dirent) error {
 // - parent.Inode.overlay.upper must be non-nil.
 // - next.Inode.overlay.copyMu must be locked writable.
 // - next.Inode.overlay.lower must be non-nil.
+// - next.Inode.overlay.lower.StableAttr.Type must be RegularFile, Directory,
+//   or Symlink.
 // - upper filesystem must support setting file ownership and timestamps.
 func copyUpLocked(ctx context.Context, parent *Dirent, next *Dirent) error {
 	// Extract the attributes of the file we wish to copy.
@@ -188,11 +198,15 @@ func copyUpLocked(ctx context.Context, parent *Dirent, next *Dirent) error {
 
 	var childUpperInode *Inode
 	parentUpper := parent.Inode.overlay.upper
+	root := RootFromContext(ctx)
+	if root != nil {
+		defer root.DecRef()
+	}
 
 	// Create the file in the upper filesystem and get an Inode for it.
 	switch next.Inode.StableAttr.Type {
 	case RegularFile:
-		childFile, err := parentUpper.Create(ctx, RootFromContext(ctx), next.name, FileFlags{Read: true, Write: true}, attrs.Perms)
+		childFile, err := parentUpper.Create(ctx, root, next.name, FileFlags{Read: true, Write: true}, attrs.Perms)
 		if err != nil {
 			log.Warningf("copy up failed to create file: %v", err)
 			return syserror.EIO
@@ -201,7 +215,7 @@ func copyUpLocked(ctx context.Context, parent *Dirent, next *Dirent) error {
 		childUpperInode = childFile.Dirent.Inode
 
 	case Directory:
-		if err := parentUpper.CreateDirectory(ctx, RootFromContext(ctx), next.name, attrs.Perms); err != nil {
+		if err := parentUpper.CreateDirectory(ctx, root, next.name, attrs.Perms); err != nil {
 			log.Warningf("copy up failed to create directory: %v", err)
 			return syserror.EIO
 		}
@@ -221,7 +235,7 @@ func copyUpLocked(ctx context.Context, parent *Dirent, next *Dirent) error {
 			log.Warningf("copy up failed to read symlink value: %v", err)
 			return syserror.EIO
 		}
-		if err := parentUpper.CreateLink(ctx, RootFromContext(ctx), link, next.name); err != nil {
+		if err := parentUpper.CreateLink(ctx, root, link, next.name); err != nil {
 			log.Warningf("copy up failed to create symlink: %v", err)
 			return syserror.EIO
 		}
@@ -235,7 +249,7 @@ func copyUpLocked(ctx context.Context, parent *Dirent, next *Dirent) error {
 		childUpperInode = childUpper.Inode
 
 	default:
-		return syserror.EINVAL
+		panic(fmt.Sprintf("copy up of invalid type %v on %+v", next.Inode.StableAttr.Type, next))
 	}
 
 	// Bring file attributes up to date. This does not include size, which will be

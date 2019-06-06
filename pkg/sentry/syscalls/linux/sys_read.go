@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -192,7 +192,7 @@ func Preadv(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Preadv2 implements linux syscall preadv2(2).
-// TODO: Implement RWF_HIPRI functionality.
+// TODO(b/120162627): Implement RWF_HIPRI functionality.
 func Preadv2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	// While the syscall is
 	// preadv2(int fd, struct iovec* iov, int iov_cnt, off_t offset, int flags)

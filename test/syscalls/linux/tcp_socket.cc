@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
 #include <limits>
 #include <vector>
 
@@ -190,7 +191,7 @@ TEST_P(TcpSocketTest, SenderAddressIgnoredOnPeek) {
 TEST_P(TcpSocketTest, SendtoAddressIgnored) {
   struct sockaddr_storage addr;
   memset(&addr, 0, sizeof(addr));
-  addr.ss_family = GetParam();  // FIXME
+  addr.ss_family = GetParam();  // FIXME(b/63803955)
 
   char data = '\0';
   EXPECT_THAT(
@@ -507,8 +508,8 @@ TEST_P(TcpSocketTest, SetNoDelay) {
   EXPECT_EQ(get, kSockOptOff);
 }
 
-INSTANTIATE_TEST_CASE_P(AllInetTests, TcpSocketTest,
-                        ::testing::Values(AF_INET, AF_INET6));
+INSTANTIATE_TEST_SUITE_P(AllInetTests, TcpSocketTest,
+                         ::testing::Values(AF_INET, AF_INET6));
 
 // Fixture for tests parameterized by address family that don't want the fixture
 // to do things.
@@ -750,8 +751,8 @@ TEST_P(SimpleTcpSocketTest, NonBlockingConnectRefused) {
   EXPECT_THAT(close(s.release()), SyscallSucceeds());
 }
 
-INSTANTIATE_TEST_CASE_P(AllInetTests, SimpleTcpSocketTest,
-                        ::testing::Values(AF_INET, AF_INET6));
+INSTANTIATE_TEST_SUITE_P(AllInetTests, SimpleTcpSocketTest,
+                         ::testing::Values(AF_INET, AF_INET6));
 
 }  // namespace
 

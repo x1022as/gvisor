@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,8 +28,8 @@ std::vector<SocketKind> GetSockets() {
       AllBitwiseCombinations(List<int>{0, SOCK_NONBLOCK}));
 }
 
-INSTANTIATE_TEST_CASE_P(IPv4TCPSockets,
-                        IPv4TCPUnboundExternalNetworkingSocketTest,
-                        ::testing::ValuesIn(GetSockets()));
+INSTANTIATE_TEST_SUITE_P(IPv4TCPUnboundSockets,
+                         IPv4TCPUnboundExternalNetworkingSocketTest,
+                         ::testing::ValuesIn(GetSockets()));
 }  // namespace testing
 }  // namespace gvisor

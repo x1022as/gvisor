@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -104,7 +104,7 @@ func (s *session) afterLoad() {
 	// If private unix sockets are enabled, create and fill the session's endpoint
 	// maps.
 	if opts.privateunixsocket {
-		// TODO: Context is not plumbed to save/restore.
+		// TODO(b/38173783): Context is not plumbed to save/restore.
 		ctx := &dummyClockContext{context.Background()}
 
 		if err = s.restoreEndpointMaps(ctx); err != nil {

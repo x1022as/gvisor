@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,7 +65,7 @@ func (v *versionData) ReadSeqFileData(ctx context.Context, h seqfile.SeqHandle) 
 	// Since we don't really want to expose build information to
 	// applications, those fields are omitted.
 	//
-	// FIXME: Using Version from the init task SyscallTable
+	// FIXME(mpratt): Using Version from the init task SyscallTable
 	// disregards the different version a task may have (e.g., in a uts
 	// namespace).
 	ver := init.Leader().SyscallTable().Version

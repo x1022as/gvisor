@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,7 @@ var (
 	watchdogAction = flag.String("watchdog-action", "log", "sets what action the watchdog takes when triggered: log (default), panic.")
 	panicSignal    = flag.Int("panic-signal", -1, "register signal handling that panics. Usually set to SIGUSR2(12) to troubleshoot hangs. -1 disables it.")
 	profile        = flag.Bool("profile", false, "prepares the sandbox to use Golang profiler. Note that enabling profiler loosens the seccomp protection added to the sandbox (DO NOT USE IN PRODUCTION).")
+	netRaw         = flag.Bool("net-raw", false, "enable raw sockets. When false, raw sockets are disabled by removing CAP_NET_RAW from containers (`runsc exec` will still be able to utilize raw sockets). Raw sockets allow malicious containers to craft packets and potentially attack the network.")
 
 	testOnlyAllowRunAsCurrentUserWithoutChroot = flag.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
 )
@@ -80,6 +82,7 @@ func main() {
 	subcommands.Register(new(cmd.Checkpoint), "")
 	subcommands.Register(new(cmd.Create), "")
 	subcommands.Register(new(cmd.Delete), "")
+	subcommands.Register(new(cmd.Do), "")
 	subcommands.Register(new(cmd.Events), "")
 	subcommands.Register(new(cmd.Exec), "")
 	subcommands.Register(new(cmd.Gofer), "")
@@ -157,6 +160,7 @@ func main() {
 		WatchdogAction: wa,
 		PanicSignal:    *panicSignal,
 		ProfileEnable:  *profile,
+		EnableRaw:      *netRaw,
 		TestOnlyAllowRunAsCurrentUserWithoutChroot: *testOnlyAllowRunAsCurrentUserWithoutChroot,
 	}
 	if len(*straceSyscalls) != 0 {
@@ -167,6 +171,8 @@ func main() {
 	if *debug {
 		log.SetLevel(log.Debug)
 	}
+
+	subcommand := flag.CommandLine.Arg(0)
 
 	var logFile io.Writer = os.Stderr
 	if *logFD > -1 {
@@ -180,11 +186,12 @@ func main() {
 			cmd.Fatalf("error opening log file %q: %v", *logFilename, err)
 		}
 		logFile = f
+	} else if subcommand == "do" {
+		logFile = ioutil.Discard
 	}
 
 	e := newEmitter(*logFormat, logFile)
 
-	subcommand := flag.CommandLine.Arg(0)
 	if *debugLogFD > -1 {
 		f := os.NewFile(uintptr(*debugLogFD), "debug log file")
 

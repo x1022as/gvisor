@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -234,6 +234,10 @@ func (c *Context) GetPacket() []byte {
 		copy(b, p.Header)
 		copy(b[len(p.Header):], p.Payload)
 
+		if p.GSO != nil && p.GSO.L3HdrLen != header.IPv4MinimumSize {
+			c.t.Errorf("L3HdrLen %v (expected %v)", p.GSO.L3HdrLen, header.IPv4MinimumSize)
+		}
+
 		checker.IPv4(c.t, b, checker.SrcAddr(StackAddr), checker.DstAddr(TestAddr))
 		return b
 
@@ -351,13 +355,27 @@ func (c *Context) SendPacket(payload []byte, h *Headers) {
 
 // SendAck sends an ACK packet.
 func (c *Context) SendAck(seq seqnum.Value, bytesReceived int) {
+	c.SendAckWithSACK(seq, bytesReceived, nil)
+}
+
+// SendAckWithSACK sends an ACK packet which includes the sackBlocks specified.
+func (c *Context) SendAckWithSACK(seq seqnum.Value, bytesReceived int, sackBlocks []header.SACKBlock) {
+	options := make([]byte, 40)
+	offset := 0
+	if len(sackBlocks) > 0 {
+		offset += header.EncodeNOP(options[offset:])
+		offset += header.EncodeNOP(options[offset:])
+		offset += header.EncodeSACKBlocks(sackBlocks, options[offset:])
+	}
+
 	c.SendPacket(nil, &Headers{
 		SrcPort: TestPort,
 		DstPort: c.Port,
 		Flags:   header.TCPFlagAck,
-		SeqNum:  seqnum.Value(testInitialSequenceNumber).Add(1),
+		SeqNum:  seq,
 		AckNum:  c.IRS.Add(1 + seqnum.Size(bytesReceived)),
 		RcvWnd:  30000,
+		TCPOpts: options[:offset],
 	})
 }
 
@@ -365,9 +383,17 @@ func (c *Context) SendAck(seq seqnum.Value, bytesReceived int) {
 // verifies that the packet packet payload of packet matches the slice
 // of data indicated by offset & size.
 func (c *Context) ReceiveAndCheckPacket(data []byte, offset, size int) {
+	c.ReceiveAndCheckPacketWithOptions(data, offset, size, 0)
+}
+
+// ReceiveAndCheckPacketWithOptions reads a packet from the link layer endpoint
+// and verifies that the packet packet payload of packet matches the slice of
+// data indicated by offset & size and skips optlen bytes in addition to the IP
+// TCP headers when comparing the data.
+func (c *Context) ReceiveAndCheckPacketWithOptions(data []byte, offset, size, optlen int) {
 	b := c.GetPacket()
 	checker.IPv4(c.t, b,
-		checker.PayloadLen(size+header.TCPMinimumSize),
+		checker.PayloadLen(size+header.TCPMinimumSize+optlen),
 		checker.TCP(
 			checker.DstPort(TestPort),
 			checker.SeqNum(uint32(c.IRS.Add(seqnum.Size(1+offset)))),
@@ -377,7 +403,7 @@ func (c *Context) ReceiveAndCheckPacket(data []byte, offset, size int) {
 	)
 
 	pdata := data[offset:][:size]
-	if p := b[header.IPv4MinimumSize+header.TCPMinimumSize:]; bytes.Compare(pdata, p) != 0 {
+	if p := b[header.IPv4MinimumSize+header.TCPMinimumSize+optlen:]; bytes.Compare(pdata, p) != 0 {
 		c.t.Fatalf("Data is different: expected %v, got %v", pdata, p)
 	}
 }
@@ -679,12 +705,14 @@ func (c *Context) CreateConnectedWithOptions(wantOptions header.TCPSynOptions) *
 	b := c.GetPacket()
 	// Validate that the syn has the timestamp option and a valid
 	// TS value.
+	mss := uint16(c.linkEP.MTU() - header.IPv4MinimumSize - header.TCPMinimumSize)
+
 	checker.IPv4(c.t, b,
 		checker.TCP(
 			checker.DstPort(TestPort),
 			checker.TCPFlags(header.TCPFlagSyn),
 			checker.TCPSynOptions(header.TCPSynOptions{
-				MSS:           uint16(c.linkEP.MTU() - header.IPv4MinimumSize - header.TCPMinimumSize),
+				MSS:           mss,
 				TS:            true,
 				WS:            defaultWindowScale,
 				SACKPermitted: c.SACKEnabled(),
@@ -955,4 +983,15 @@ func (c *Context) SACKEnabled() bool {
 		return false
 	}
 	return bool(v)
+}
+
+// SetGSOEnabled enables or disables generic segmentation offload.
+func (c *Context) SetGSOEnabled(enable bool) {
+	c.linkEP.GSO = enable
+}
+
+// MSSWithoutOptions returns the value for the MSS used by the stack when no
+// options are in use.
+func (c *Context) MSSWithoutOptions() uint16 {
+	return uint16(c.linkEP.MTU() - header.IPv4MinimumSize - header.TCPMinimumSize)
 }

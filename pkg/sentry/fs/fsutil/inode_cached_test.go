@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memmap"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/safemem"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
+	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
 
 type noopBackingFile struct{}
@@ -48,6 +49,10 @@ func (noopBackingFile) Sync(context.Context) error {
 
 func (noopBackingFile) FD() int {
 	return -1
+}
+
+func (noopBackingFile) Allocate(ctx context.Context, offset int64, length int64) error {
+	return nil
 }
 
 func TestSetPermissions(t *testing.T) {
@@ -237,6 +242,10 @@ func (*sliceBackingFile) FD() int {
 	return -1
 }
 
+func (f *sliceBackingFile) Allocate(ctx context.Context, offset int64, length int64) error {
+	return syserror.EOPNOTSUPP
+}
+
 type noopMappingSpace struct{}
 
 // Invalidate implements memmap.MappingSpace.Invalidate.
@@ -311,12 +320,10 @@ func TestRead(t *testing.T) {
 		t.Errorf("Read back bytes %v, want %v", rbuf, buf)
 	}
 
-	// Delete the memory mapping and expect it to cause the cached page to be
-	// uncached.
+	// Delete the memory mapping before iops.Release(). The cached page will
+	// either be evicted by ctx's pgalloc.MemoryFile, or dropped by
+	// iops.Release().
 	iops.RemoveMapping(ctx, ms, ar, usermem.PageSize, true)
-	if cached := iops.cache.Span(); cached != 0 {
-		t.Fatalf("Span got %d, want 0", cached)
-	}
 }
 
 func TestWrite(t *testing.T) {

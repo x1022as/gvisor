@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ func Context(tb testing.TB) context.Context {
 		tb.Fatalf("error creating application memory file: %v", err)
 	}
 	memfile := os.NewFile(uintptr(memfd), memfileName)
-	mf, err := pgalloc.NewMemoryFile(memfile)
+	mf, err := pgalloc.NewMemoryFile(memfile, pgalloc.MemoryFileOpts{})
 	if err != nil {
 		memfile.Close()
 		tb.Fatalf("error creating pgalloc.MemoryFile: %v", err)

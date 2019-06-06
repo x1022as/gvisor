@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ package p9
 
 import (
 	"fmt"
-	"reflect"
+	"math"
 
 	"gvisor.googlesource.com/gvisor/pkg/fd"
 )
@@ -193,6 +193,7 @@ func (t *Twalk) Decode(b *buffer) {
 	t.FID = b.ReadFID()
 	t.NewFID = b.ReadFID()
 	n := b.Read16()
+	t.Names = t.Names[:0]
 	for i := 0; i < int(n); i++ {
 		t.Names = append(t.Names, b.ReadString())
 	}
@@ -227,6 +228,7 @@ type Rwalk struct {
 // Decode implements encoder.Decode.
 func (r *Rwalk) Decode(b *buffer) {
 	n := b.Read16()
+	r.QIDs = r.QIDs[:0]
 	for i := 0; i < int(n); i++ {
 		var q QID
 		q.Decode(b)
@@ -1161,8 +1163,8 @@ type Tmknod struct {
 	// Name is the device name.
 	Name string
 
-	// Permissions are the device permissions.
-	Permissions FileMode
+	// Mode is the device mode and permissions.
+	Mode FileMode
 
 	// Major is the device major number.
 	Major uint32
@@ -1178,7 +1180,7 @@ type Tmknod struct {
 func (t *Tmknod) Decode(b *buffer) {
 	t.Directory = b.ReadFID()
 	t.Name = b.ReadString()
-	t.Permissions = b.ReadPermissions()
+	t.Mode = b.ReadFileMode()
 	t.Major = b.Read32()
 	t.Minor = b.Read32()
 	t.GID = b.ReadGID()
@@ -1188,7 +1190,7 @@ func (t *Tmknod) Decode(b *buffer) {
 func (t *Tmknod) Encode(b *buffer) {
 	b.WriteFID(t.Directory)
 	b.WriteString(t.Name)
-	b.WritePermissions(t.Permissions)
+	b.WriteFileMode(t.Mode)
 	b.Write32(t.Major)
 	b.Write32(t.Minor)
 	b.WriteGID(t.GID)
@@ -1201,7 +1203,7 @@ func (*Tmknod) Type() MsgType {
 
 // String implements fmt.Stringer.
 func (t *Tmknod) String() string {
-	return fmt.Sprintf("Tmknod{DirectoryFID: %d, Name: %s, Permissions: 0o%o, Major: %d, Minor: %d, GID: %d}", t.Directory, t.Name, t.Permissions, t.Major, t.Minor, t.GID)
+	return fmt.Sprintf("Tmknod{DirectoryFID: %d, Name: %s, Mode: 0o%o, Major: %d, Minor: %d, GID: %d}", t.Directory, t.Name, t.Mode, t.Major, t.Minor, t.GID)
 }
 
 // Rmknod is a mknod response.
@@ -1422,6 +1424,63 @@ func (r *Rsetattr) String() string {
 	return fmt.Sprintf("Rsetattr{}")
 }
 
+// Tallocate is an allocate request. This is an extension to 9P protocol, not
+// present in the 9P2000.L standard.
+type Tallocate struct {
+	FID    FID
+	Mode   AllocateMode
+	Offset uint64
+	Length uint64
+}
+
+// Decode implements encoder.Decode.
+func (t *Tallocate) Decode(b *buffer) {
+	t.FID = b.ReadFID()
+	t.Mode.Decode(b)
+	t.Offset = b.Read64()
+	t.Length = b.Read64()
+}
+
+// Encode implements encoder.Encode.
+func (t *Tallocate) Encode(b *buffer) {
+	b.WriteFID(t.FID)
+	t.Mode.Encode(b)
+	b.Write64(t.Offset)
+	b.Write64(t.Length)
+}
+
+// Type implements message.Type.
+func (*Tallocate) Type() MsgType {
+	return MsgTallocate
+}
+
+// String implements fmt.Stringer.
+func (t *Tallocate) String() string {
+	return fmt.Sprintf("Tallocate{FID: %d, Offset: %d, Length: %d}", t.FID, t.Offset, t.Length)
+}
+
+// Rallocate is an allocate response.
+type Rallocate struct {
+}
+
+// Decode implements encoder.Decode.
+func (*Rallocate) Decode(b *buffer) {
+}
+
+// Encode implements encoder.Encode.
+func (*Rallocate) Encode(b *buffer) {
+}
+
+// Type implements message.Type.
+func (*Rallocate) Type() MsgType {
+	return MsgRallocate
+}
+
+// String implements fmt.Stringer.
+func (r *Rallocate) String() string {
+	return fmt.Sprintf("Rallocate{}")
+}
+
 // Txattrwalk walks extended attributes.
 type Txattrwalk struct {
 	// FID is the FID to check for attributes.
@@ -1608,6 +1667,7 @@ type Rreaddir struct {
 func (r *Rreaddir) Decode(b *buffer) {
 	r.Count = b.Read32()
 	entriesBuf := buffer{data: r.payload}
+	r.Entries = r.Entries[:0]
 	for {
 		var d Dirent
 		d.Decode(&entriesBuf)
@@ -1827,6 +1887,7 @@ func (t *Twalkgetattr) Decode(b *buffer) {
 	t.FID = b.ReadFID()
 	t.NewFID = b.ReadFID()
 	n := b.Read16()
+	t.Names = t.Names[:0]
 	for i := 0; i < int(n); i++ {
 		t.Names = append(t.Names, b.ReadString())
 	}
@@ -1869,6 +1930,7 @@ func (r *Rwalkgetattr) Decode(b *buffer) {
 	r.Valid.Decode(b)
 	r.Attr.Decode(b)
 	n := b.Read16()
+	r.QIDs = r.QIDs[:0]
 	for i := 0; i < int(n); i++ {
 		var q QID
 		q.Decode(b)
@@ -2139,36 +2201,79 @@ func (r *Rlconnect) String() string {
 	return fmt.Sprintf("Rlconnect{File: %v}", r.File)
 }
 
-// messageRegistry indexes all messages by type.
-var messageRegistry = make(map[MsgType]func() message)
+const maxCacheSize = 3
 
-// messageByType creates a new message by type.
+// msgFactory is used to reduce allocations by caching messages for reuse.
+type msgFactory struct {
+	create func() message
+	cache  chan message
+}
+
+// msgRegistry indexes all message factories by type.
+var msgRegistry registry
+
+type registry struct {
+	factories [math.MaxUint8]msgFactory
+
+	// largestFixedSize is computed so that given some message size M, you can
+	// compute the maximum payload size (e.g. for Twrite, Rread) with
+	// M-largestFixedSize. You could do this individual on a per-message basis,
+	// but it's easier to compute a single maximum safe payload.
+	largestFixedSize uint32
+}
+
+// get returns a new message by type.
 //
 // An error is returned in the case of an unknown message.
 //
 // This takes, and ignores, a message tag so that it may be used directly as a
 // lookupTagAndType function for recv (by design).
-func messageByType(_ Tag, t MsgType) (message, error) {
-	fn, ok := messageRegistry[t]
-	if !ok {
+func (r *registry) get(_ Tag, t MsgType) (message, error) {
+	entry := &r.factories[t]
+	if entry.create == nil {
 		return nil, &ErrInvalidMsgType{t}
 	}
-	return fn(), nil
+
+	select {
+	case msg := <-entry.cache:
+		return msg, nil
+	default:
+		return entry.create(), nil
+	}
+}
+
+func (r *registry) put(msg message) {
+	if p, ok := msg.(payloader); ok {
+		p.SetPayload(nil)
+	}
+	if f, ok := msg.(filer); ok {
+		f.SetFilePayload(nil)
+	}
+
+	entry := &r.factories[msg.Type()]
+	select {
+	case entry.cache <- msg:
+	default:
+	}
 }
 
 // register registers the given message type.
 //
-// This uses reflection and records only the type. This may cause panic on
-// failure and should only be used from init.
-func register(m message) {
-	t := m.Type()
-	if fn, ok := messageRegistry[t]; ok {
-		panic(fmt.Sprintf("duplicate message type %d: first is %#v, second is %#v", t, fn(), m))
+// This may cause panic on failure and should only be used from init.
+func (r *registry) register(t MsgType, fn func() message) {
+	if int(t) >= len(r.factories) {
+		panic(fmt.Sprintf("message type %d is too large. It must be smaller than %d", t, len(r.factories)))
+	}
+	if r.factories[t].create != nil {
+		panic(fmt.Sprintf("duplicate message type %d: first is %T, second is %T", t, r.factories[t].create(), fn()))
+	}
+	r.factories[t] = msgFactory{
+		create: fn,
+		cache:  make(chan message, maxCacheSize),
 	}
 
-	to := reflect.ValueOf(m).Elem().Type()
-	messageRegistry[t] = func() message {
-		return reflect.New(to).Interface().(message)
+	if size := calculateSize(fn()); size > r.largestFixedSize {
+		r.largestFixedSize = size
 	}
 }
 
@@ -2181,91 +2286,74 @@ func calculateSize(m message) uint32 {
 	return uint32(len(dataBuf.data))
 }
 
-// largestFixedSize is computed within calculateLargestSize.
-//
-// This is computed so that given some message size M, you can compute
-// the maximum payload size (e.g. for Twrite, Rread) with M-largestFixedSize.
-// You could do this individual on a per-message basis, but it's easier to
-// compute a single maximum safe payload.
-var largestFixedSize uint32
-
-// calculateLargestFixedSize is called from within init.
-func calculateLargestFixedSize() {
-	for _, fn := range messageRegistry {
-		if size := calculateSize(fn()); size > largestFixedSize {
-			largestFixedSize = size
-		}
-	}
-}
-
 func init() {
-	register(&Rlerror{})
-	register(&Tstatfs{})
-	register(&Rstatfs{})
-	register(&Tlopen{})
-	register(&Rlopen{})
-	register(&Tlcreate{})
-	register(&Rlcreate{})
-	register(&Tsymlink{})
-	register(&Rsymlink{})
-	register(&Tmknod{})
-	register(&Rmknod{})
-	register(&Trename{})
-	register(&Rrename{})
-	register(&Treadlink{})
-	register(&Rreadlink{})
-	register(&Tgetattr{})
-	register(&Rgetattr{})
-	register(&Tsetattr{})
-	register(&Rsetattr{})
-	register(&Txattrwalk{})
-	register(&Rxattrwalk{})
-	register(&Txattrcreate{})
-	register(&Rxattrcreate{})
-	register(&Treaddir{})
-	register(&Rreaddir{})
-	register(&Tfsync{})
-	register(&Rfsync{})
-	register(&Tlink{})
-	register(&Rlink{})
-	register(&Tmkdir{})
-	register(&Rmkdir{})
-	register(&Trenameat{})
-	register(&Rrenameat{})
-	register(&Tunlinkat{})
-	register(&Runlinkat{})
-	register(&Tversion{})
-	register(&Rversion{})
-	register(&Tauth{})
-	register(&Rauth{})
-	register(&Tattach{})
-	register(&Rattach{})
-	register(&Tflush{})
-	register(&Rflush{})
-	register(&Twalk{})
-	register(&Rwalk{})
-	register(&Tread{})
-	register(&Rread{})
-	register(&Twrite{})
-	register(&Rwrite{})
-	register(&Tclunk{})
-	register(&Rclunk{})
-	register(&Tremove{})
-	register(&Rremove{})
-	register(&Tflushf{})
-	register(&Rflushf{})
-	register(&Twalkgetattr{})
-	register(&Rwalkgetattr{})
-	register(&Tucreate{})
-	register(&Rucreate{})
-	register(&Tumkdir{})
-	register(&Rumkdir{})
-	register(&Tumknod{})
-	register(&Rumknod{})
-	register(&Tusymlink{})
-	register(&Rusymlink{})
-	register(&Tlconnect{})
-	register(&Rlconnect{})
-
-	calculateLargestFixedSize()
+	msgRegistry.register(MsgRlerror, func() message { return &Rlerror{} })
+	msgRegistry.register(MsgTstatfs, func() message { return &Tstatfs{} })
+	msgRegistry.register(MsgRstatfs, func() message { return &Rstatfs{} })
+	msgRegistry.register(MsgTlopen, func() message { return &Tlopen{} })
+	msgRegistry.register(MsgRlopen, func() message { return &Rlopen{} })
+	msgRegistry.register(MsgTlcreate, func() message { return &Tlcreate{} })
+	msgRegistry.register(MsgRlcreate, func() message { return &Rlcreate{} })
+	msgRegistry.register(MsgTsymlink, func() message { return &Tsymlink{} })
+	msgRegistry.register(MsgRsymlink, func() message { return &Rsymlink{} })
+	msgRegistry.register(MsgTmknod, func() message { return &Tmknod{} })
+	msgRegistry.register(MsgRmknod, func() message { return &Rmknod{} })
+	msgRegistry.register(MsgTrename, func() message { return &Trename{} })
+	msgRegistry.register(MsgRrename, func() message { return &Rrename{} })
+	msgRegistry.register(MsgTreadlink, func() message { return &Treadlink{} })
+	msgRegistry.register(MsgRreadlink, func() message { return &Rreadlink{} })
+	msgRegistry.register(MsgTgetattr, func() message { return &Tgetattr{} })
+	msgRegistry.register(MsgRgetattr, func() message { return &Rgetattr{} })
+	msgRegistry.register(MsgTsetattr, func() message { return &Tsetattr{} })
+	msgRegistry.register(MsgRsetattr, func() message { return &Rsetattr{} })
+	msgRegistry.register(MsgTxattrwalk, func() message { return &Txattrwalk{} })
+	msgRegistry.register(MsgRxattrwalk, func() message { return &Rxattrwalk{} })
+	msgRegistry.register(MsgTxattrcreate, func() message { return &Txattrcreate{} })
+	msgRegistry.register(MsgRxattrcreate, func() message { return &Rxattrcreate{} })
+	msgRegistry.register(MsgTreaddir, func() message { return &Treaddir{} })
+	msgRegistry.register(MsgRreaddir, func() message { return &Rreaddir{} })
+	msgRegistry.register(MsgTfsync, func() message { return &Tfsync{} })
+	msgRegistry.register(MsgRfsync, func() message { return &Rfsync{} })
+	msgRegistry.register(MsgTlink, func() message { return &Tlink{} })
+	msgRegistry.register(MsgRlink, func() message { return &Rlink{} })
+	msgRegistry.register(MsgTmkdir, func() message { return &Tmkdir{} })
+	msgRegistry.register(MsgRmkdir, func() message { return &Rmkdir{} })
+	msgRegistry.register(MsgTrenameat, func() message { return &Trenameat{} })
+	msgRegistry.register(MsgRrenameat, func() message { return &Rrenameat{} })
+	msgRegistry.register(MsgTunlinkat, func() message { return &Tunlinkat{} })
+	msgRegistry.register(MsgRunlinkat, func() message { return &Runlinkat{} })
+	msgRegistry.register(MsgTversion, func() message { return &Tversion{} })
+	msgRegistry.register(MsgRversion, func() message { return &Rversion{} })
+	msgRegistry.register(MsgTauth, func() message { return &Tauth{} })
+	msgRegistry.register(MsgRauth, func() message { return &Rauth{} })
+	msgRegistry.register(MsgTattach, func() message { return &Tattach{} })
+	msgRegistry.register(MsgRattach, func() message { return &Rattach{} })
+	msgRegistry.register(MsgTflush, func() message { return &Tflush{} })
+	msgRegistry.register(MsgRflush, func() message { return &Rflush{} })
+	msgRegistry.register(MsgTwalk, func() message { return &Twalk{} })
+	msgRegistry.register(MsgRwalk, func() message { return &Rwalk{} })
+	msgRegistry.register(MsgTread, func() message { return &Tread{} })
+	msgRegistry.register(MsgRread, func() message { return &Rread{} })
+	msgRegistry.register(MsgTwrite, func() message { return &Twrite{} })
+	msgRegistry.register(MsgRwrite, func() message { return &Rwrite{} })
+	msgRegistry.register(MsgTclunk, func() message { return &Tclunk{} })
+	msgRegistry.register(MsgRclunk, func() message { return &Rclunk{} })
+	msgRegistry.register(MsgTremove, func() message { return &Tremove{} })
+	msgRegistry.register(MsgRremove, func() message { return &Rremove{} })
+	msgRegistry.register(MsgTflushf, func() message { return &Tflushf{} })
+	msgRegistry.register(MsgRflushf, func() message { return &Rflushf{} })
+	msgRegistry.register(MsgTwalkgetattr, func() message { return &Twalkgetattr{} })
+	msgRegistry.register(MsgRwalkgetattr, func() message { return &Rwalkgetattr{} })
+	msgRegistry.register(MsgTucreate, func() message { return &Tucreate{} })
+	msgRegistry.register(MsgRucreate, func() message { return &Rucreate{} })
+	msgRegistry.register(MsgTumkdir, func() message { return &Tumkdir{} })
+	msgRegistry.register(MsgRumkdir, func() message { return &Rumkdir{} })
+	msgRegistry.register(MsgTumknod, func() message { return &Tumknod{} })
+	msgRegistry.register(MsgRumknod, func() message { return &Rumknod{} })
+	msgRegistry.register(MsgTusymlink, func() message { return &Tusymlink{} })
+	msgRegistry.register(MsgRusymlink, func() message { return &Rusymlink{} })
+	msgRegistry.register(MsgTlconnect, func() message { return &Tlconnect{} })
+	msgRegistry.register(MsgRlconnect, func() message { return &Rlconnect{} })
+	msgRegistry.register(MsgTallocate, func() message { return &Tallocate{} })
+	msgRegistry.register(MsgRallocate, func() message { return &Rallocate{} })
 }

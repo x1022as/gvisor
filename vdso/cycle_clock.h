@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ namespace vdso {
 
 #if __x86_64__
 
-// TODO: The appropriate barrier instruction to use with rdtsc on
+// TODO(b/74613497): The appropriate barrier instruction to use with rdtsc on
 // x86_64 depends on the vendor. Intel processors can use lfence but AMD may
 // need mfence, depending on MSR_F10H_DECFG_LFENCE_SERIALIZE_BIT.
 
@@ -33,6 +33,15 @@ static inline uint64_t cycle_clock(void) {
   asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
+
+#elif __aarch64__
+
+static inline uint64_t cycle_clock(void) {
+  uint64_t val;
+  asm volatile("mrs %0, CNTVCT_EL0" : "=r"(val)::"memory");
+  return val;
+}
+
 #else
 #error "unsupported architecture"
 #endif

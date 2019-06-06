@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -87,7 +87,7 @@ func EpollCtl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 			flags |= epoll.EdgeTriggered
 		}
 
-		mask = waiter.EventMask(e.Events)
+		mask = waiter.EventMaskFromLinux(e.Events)
 		data[0] = e.Fd
 		data[1] = e.Pad
 	}

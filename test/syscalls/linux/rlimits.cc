@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,14 +25,18 @@ namespace {
 
 TEST(RlimitTest, SetRlimitHigher) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_RESOURCE)));
-  SKIP_IF(!IsRunningOnGvisor());
 
   struct rlimit rl = {};
   EXPECT_THAT(getrlimit(RLIMIT_NOFILE, &rl), SyscallSucceeds());
 
-  // Even with CAP_SYS_RESOURCE, gVisor does not allow setting a higher rlimit.
+  // Lower the rlimit first, as it may be equal to /proc/sys/fs/nr_open, in
+  // which case even users with CAP_SYS_RESOURCE can't raise it.
+  rl.rlim_cur--;
+  rl.rlim_max--;
+  ASSERT_THAT(setrlimit(RLIMIT_NOFILE, &rl), SyscallSucceeds());
+
   rl.rlim_max++;
-  EXPECT_THAT(setrlimit(RLIMIT_NOFILE, &rl), SyscallFailsWithErrno(EPERM));
+  EXPECT_THAT(setrlimit(RLIMIT_NOFILE, &rl), SyscallSucceeds());
 }
 
 TEST(RlimitTest, UnprivilegedSetRlimit) {
@@ -53,6 +57,16 @@ TEST(RlimitTest, UnprivilegedSetRlimit) {
 
   rl.rlim_max = 100000;
   EXPECT_THAT(setrlimit(RLIMIT_NOFILE, &rl), SyscallFailsWithErrno(EPERM));
+}
+
+TEST(RlimitTest, SetSoftRlimitAboveHard) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_RESOURCE)));
+
+  struct rlimit rl = {};
+  EXPECT_THAT(getrlimit(RLIMIT_NOFILE, &rl), SyscallSucceeds());
+
+  rl.rlim_cur = rl.rlim_max + 1;
+  EXPECT_THAT(setrlimit(RLIMIT_NOFILE, &rl), SyscallFailsWithErrno(EINVAL));
 }
 
 }  // namespace

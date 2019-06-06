@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -165,6 +165,24 @@ func NewFromFile(file *os.File) (*FD, error) {
 		return &FD{ReadWriter{-1}}, err
 	}
 	return New(fd), nil
+}
+
+// Open is equivallent to open(2).
+func Open(path string, openmode int, perm uint32) (*FD, error) {
+	f, err := syscall.Open(path, openmode|syscall.O_LARGEFILE, perm)
+	if err != nil {
+		return nil, err
+	}
+	return New(f), nil
+}
+
+// OpenAt is equivallent to openat(2).
+func OpenAt(dir *FD, path string, flags int, mode uint32) (*FD, error) {
+	f, err := syscall.Openat(dir.FD(), path, flags, mode)
+	if err != nil {
+		return nil, err
+	}
+	return New(f), nil
 }
 
 // Close closes the file descriptor contained in the FD.

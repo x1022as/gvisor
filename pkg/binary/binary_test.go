@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -55,8 +56,8 @@ func TestPanic(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			defer func() {
 				r := recover()
-				if got := fmt.Sprint(r); got != test.want {
-					t.Errorf("Got recover() = %q, want = %q", got, test.want)
+				if got := fmt.Sprint(r); !strings.HasPrefix(got, test.want) {
+					t.Errorf("Got recover() = %q, want prefix = %q", got, test.want)
 				}
 			}()
 

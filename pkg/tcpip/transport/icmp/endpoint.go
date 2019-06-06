@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ import (
 	"encoding/binary"
 	"sync"
 
-	"gvisor.googlesource.com/gvisor/pkg/sleep"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/buffer"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/header"
@@ -274,13 +273,8 @@ func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-c
 	}
 
 	if route.IsResolutionRequired() {
-		waker := &sleep.Waker{}
-		if ch, err := route.Resolve(waker); err != nil {
+		if ch, err := route.Resolve(nil); err != nil {
 			if err == tcpip.ErrWouldBlock {
-				// Link address needs to be resolved.
-				// Resolution was triggered the background.
-				// Better luck next time.
-				route.RemoveWaker(waker)
 				return 0, ch, tcpip.ErrNoLinkAddress
 			}
 			return 0, nil, err
@@ -661,6 +655,22 @@ func (e *endpoint) Readiness(mask waiter.EventMask) waiter.EventMask {
 // HandlePacket is called by the stack when new packets arrive to this transport
 // endpoint.
 func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, vv buffer.VectorisedView) {
+	// Only accept echo replies.
+	switch e.netProto {
+	case header.IPv4ProtocolNumber:
+		h := header.ICMPv4(vv.First())
+		if h.Type() != header.ICMPv4EchoReply {
+			e.stack.Stats().DroppedPackets.Increment()
+			return
+		}
+	case header.IPv6ProtocolNumber:
+		h := header.ICMPv6(vv.First())
+		if h.Type() != header.ICMPv6EchoReply {
+			e.stack.Stats().DroppedPackets.Increment()
+			return
+		}
+	}
+
 	e.rcvMu.Lock()
 
 	// Drop the packet if our buffer is currently full.

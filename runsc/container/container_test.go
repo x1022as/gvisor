@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -210,7 +210,7 @@ func run(spec *specs.Spec, conf *boot.Config) error {
 	defer os.RemoveAll(bundleDir)
 
 	// Create, start and wait for the container.
-	ws, err := Run(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "")
+	ws, err := Run(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "", false)
 	if err != nil {
 		return fmt.Errorf("running container: %v", err)
 	}
@@ -242,10 +242,10 @@ func configs(opts ...configOption) []*boot.Config {
 		case overlay:
 			c.Overlay = true
 		case kvm:
-			// TODO: KVM tests are flaky. Disable until fixed.
+			// TODO(b/112165693): KVM tests are flaky. Disable until fixed.
 			continue
 
-			// TODO: KVM doesn't work with --race.
+			// TODO(b/68787993): KVM doesn't work with --race.
 			if testutil.RaceEnabled {
 				continue
 			}
@@ -416,7 +416,7 @@ func TestExePath(t *testing.T) {
 				t.Fatalf("exec: %s, error setting up container: %v", test.path, err)
 			}
 
-			ws, err := Run(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "")
+			ws, err := Run(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "", false)
 
 			os.RemoveAll(rootDir)
 			os.RemoveAll(bundleDir)
@@ -449,7 +449,7 @@ func TestAppExitStatus(t *testing.T) {
 	defer os.RemoveAll(rootDir)
 	defer os.RemoveAll(bundleDir)
 
-	ws, err := Run(testutil.UniqueContainerID(), succSpec, conf, bundleDir, "", "", "")
+	ws, err := Run(testutil.UniqueContainerID(), succSpec, conf, bundleDir, "", "", "", false)
 	if err != nil {
 		t.Fatalf("error running container: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestAppExitStatus(t *testing.T) {
 	defer os.RemoveAll(rootDir2)
 	defer os.RemoveAll(bundleDir2)
 
-	ws, err = Run(testutil.UniqueContainerID(), errSpec, conf, bundleDir2, "", "", "")
+	ws, err = Run(testutil.UniqueContainerID(), errSpec, conf, bundleDir2, "", "", "", false)
 	if err != nil {
 		t.Fatalf("error running container: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestKillPid(t *testing.T) {
 	for _, conf := range configs(overlay) {
 		t.Logf("Running test with conf: %+v", conf)
 
-		app, err := testutil.FindFile("runsc/container/test_app")
+		app, err := testutil.FindFile("runsc/container/test_app/test_app")
 		if err != nil {
 			t.Fatal("error finding test_app:", err)
 		}
@@ -792,7 +792,7 @@ func TestUnixDomainSockets(t *testing.T) {
 		}
 		defer outputFile.Close()
 
-		app, err := testutil.FindFile("runsc/container/test_app")
+		app, err := testutil.FindFile("runsc/container/test_app/test_app")
 		if err != nil {
 			t.Fatal("error finding test_app:", err)
 		}
@@ -1250,6 +1250,82 @@ func TestReadonlyRoot(t *testing.T) {
 	}
 }
 
+func TestUIDMap(t *testing.T) {
+	for _, conf := range configs(noOverlay...) {
+		t.Logf("Running test with conf: %+v", conf)
+		testDir, err := ioutil.TempDir(testutil.TmpDir(), "test-mount")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(testDir)
+		testFile := path.Join(testDir, "testfile")
+
+		spec := testutil.NewSpecWithArgs("touch", "/tmp/testfile")
+		uid := os.Getuid()
+		gid := os.Getgid()
+		spec.Linux = &specs.Linux{
+			Namespaces: []specs.LinuxNamespace{
+				{Type: specs.UserNamespace},
+				{Type: specs.PIDNamespace},
+				{Type: specs.MountNamespace},
+			},
+			UIDMappings: []specs.LinuxIDMapping{
+				{
+					ContainerID: 0,
+					HostID:      uint32(uid),
+					Size:        1,
+				},
+			},
+			GIDMappings: []specs.LinuxIDMapping{
+				{
+					ContainerID: 0,
+					HostID:      uint32(gid),
+					Size:        1,
+				},
+			},
+		}
+
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Destination: "/tmp",
+			Source:      testDir,
+			Type:        "bind",
+		})
+
+		rootDir, bundleDir, err := testutil.SetupContainer(spec, conf)
+		if err != nil {
+			t.Fatalf("error setting up container: %v", err)
+		}
+		defer os.RemoveAll(rootDir)
+		defer os.RemoveAll(bundleDir)
+
+		// Create, start and wait for the container.
+		c, err := Create(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", "")
+		if err != nil {
+			t.Fatalf("error creating container: %v", err)
+		}
+		defer c.Destroy()
+		if err := c.Start(conf); err != nil {
+			t.Fatalf("error starting container: %v", err)
+		}
+
+		ws, err := c.Wait()
+		if err != nil {
+			t.Fatalf("error waiting on container: %v", err)
+		}
+		if !ws.Exited() || ws.ExitStatus() != 0 {
+			t.Fatalf("container failed, waitStatus: %v", ws)
+		}
+		st := syscall.Stat_t{}
+		if err := syscall.Stat(testFile, &st); err != nil {
+			t.Fatalf("error stat /testfile: %v", err)
+		}
+
+		if st.Uid != uint32(uid) || st.Gid != uint32(gid) {
+			t.Fatalf("UID: %d (%d) GID: %d (%d)", st.Uid, uid, st.Gid, gid)
+		}
+	}
+}
+
 func TestReadonlyMount(t *testing.T) {
 	for _, conf := range configs(overlay) {
 		t.Logf("Running test with conf: %+v", conf)
@@ -1395,7 +1471,7 @@ func TestRootNotMount(t *testing.T) {
 		t.Skip("race makes test_app not statically linked")
 	}
 
-	appSym, err := testutil.FindFile("runsc/container/test_app")
+	appSym, err := testutil.FindFile("runsc/container/test_app/test_app")
 	if err != nil {
 		t.Fatal("error finding test_app:", err)
 	}
@@ -1421,7 +1497,7 @@ func TestRootNotMount(t *testing.T) {
 }
 
 func TestUserLog(t *testing.T) {
-	app, err := testutil.FindFile("runsc/container/test_app")
+	app, err := testutil.FindFile("runsc/container/test_app/test_app")
 	if err != nil {
 		t.Fatal("error finding test_app:", err)
 	}
@@ -1443,7 +1519,7 @@ func TestUserLog(t *testing.T) {
 	userLog := filepath.Join(dir, "user.log")
 
 	// Create, start and wait for the container.
-	ws, err := Run(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", userLog)
+	ws, err := Run(testutil.UniqueContainerID(), spec, conf, bundleDir, "", "", userLog, false)
 	if err != nil {
 		t.Fatalf("error running container: %v", err)
 	}
@@ -1765,7 +1841,7 @@ func (cont *Container) executeSync(args *control.ExecArgs) (syscall.WaitStatus, 
 	if err != nil {
 		return 0, fmt.Errorf("error executing: %v", err)
 	}
-	ws, err := cont.WaitPID(pid, true /* clearStatus */)
+	ws, err := cont.WaitPID(pid)
 	if err != nil {
 		return 0, fmt.Errorf("error waiting: %v", err)
 	}

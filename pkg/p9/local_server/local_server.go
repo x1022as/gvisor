@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -252,7 +252,7 @@ func (l *local) Link(target p9.File, newname string) error {
 // Mknod implements p9.File.Mknod.
 //
 // Not implemented.
-func (l *local) Mknod(name string, permissions p9.FileMode, major uint32, minor uint32, _ p9.UID, _ p9.GID) (p9.QID, error) {
+func (l *local) Mknod(name string, mode p9.FileMode, major uint32, minor uint32, _ p9.UID, _ p9.GID) (p9.QID, error) {
 	return p9.QID{}, syscall.ENOSYS
 }
 
@@ -321,6 +321,11 @@ func (l *local) Connect(p9.ConnectFlags) (*fd.FD, error) {
 // Renamed implements p9.File.Renamed.
 func (l *local) Renamed(parent p9.File, newName string) {
 	l.path = path.Join(parent.(*local).path, newName)
+}
+
+// Allocate implements p9.File.Allocate.
+func (l *local) Allocate(mode p9.AllocateMode, offset, length uint64) error {
+	return syscall.Fallocate(int(l.file.Fd()), mode.ToLinux(), int64(offset), int64(length))
 }
 
 func main() {

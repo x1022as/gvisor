@@ -32,7 +32,9 @@ directory tree.
 
 ### Coding Guidelines
 
-All code should conform to the [Go style guidelines][gostyle].
+All Go code should conform to the [Go style guidelines][gostyle]. C++ code
+should conform to the [Google C++ Style Guide][cppstyle] and the guidelines
+described for [tests][teststyle].
 
 As a secure runtime, we need to maintain the safety of all of code included in
 gVisor. The following rules help mitigate issues.
@@ -79,50 +81,17 @@ Rules:
 
 ### Code reviews
 
-All changes must be submitted via [Gerrit][gerrit].
-
-All submissions, including submissions by project members, require review.
-
-To submit a patch, first clone the canonical repository.
-
-```
-git clone https://gvisor.googlesource.com/gvisor
-```
-
-From within the cloned directory, install the commit hooks (optional, but if you
-don't you will need to generate Change-Ids manually in your commits).
-
-```
-curl -Lo `git rev-parse --git-dir`/hooks/commit-msg https://gerrit-review.googlesource.com/tools/hooks/commit-msg
-chmod +x `git rev-parse --git-dir`/hooks/commit-msg
-```
-
-Edit the source and generate commits as you normally would. While making
-changes, remember to organize commits logically. Changes are not reviewed per
-branch (as with a pull request), they are reviewed per commit.
-
-Before posting a new patch, you will need to generate an appropriate
-authentication cookie. Visit the [repository][repo] and click the "Generate
-Password" link at the top of the page for instructions.
-
-To post a patch for review, push to a special "for" reference.
-
-```
-git push origin HEAD:refs/for/master
-```
-
-A change link will be generated for the commit, and a team member will review
-your change request, provide feedback (and submit when appropriate).
-
-If you receive an error like `No Contributor Agreement on file for user ...`,
-make sure you've [signed the CLA](#contributor-license-agreement).
-
-To address feedback, you may need to amend your commit and repush (don't change
-the Commit-Id in the commit message). This will generate a new version of the
-change.
+Code changes are accepted via [pull request][github].
 
 When approved, the change will be submitted by a team member and automatically
 merged into the repository.
+
+### Bug IDs
+
+Some TODOs and NOTEs sprinkled throughout the code have associated IDs of the
+form `b/1234`. These correspond to bugs in our internal bug tracker. Eventually
+these bugs will be moved to the GitHub Issues, but until then they can simply be
+ignored.
 
 ### The small print
 
@@ -130,8 +99,9 @@ Contributions made by corporations are covered by a different agreement than the
 one above, the
 [Software Grant and Corporate Contributor License Agreement][gccla].
 
+[cppstyle]: https://google.github.io/styleguide/cppguide.html
 [gcla]: https://cla.developers.google.com/about/google-individual
 [gccla]: https://cla.developers.google.com/about/google-corporate
-[gerrit]: https://gvisor-review.googlesource.com
+[github]: https://github.com/google/gvisor/compare
 [gostyle]: https://github.com/golang/go/wiki/CodeReviewComments
-[repo]: https://gvisor.googlesource.com
+[teststyle]: ./test/

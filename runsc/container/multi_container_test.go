@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -175,12 +175,12 @@ func TestMultiContainerWait(t *testing.T) {
 		go func(c *Container) {
 			defer wg.Done()
 			const pid = 2
-			if ws, err := c.WaitPID(pid, true /* clearStatus */); err != nil {
+			if ws, err := c.WaitPID(pid); err != nil {
 				t.Errorf("failed to wait for PID %d: %v", pid, err)
 			} else if es := ws.ExitStatus(); es != 0 {
 				t.Errorf("PID %d exited with non-zero status %d", pid, es)
 			}
-			if _, err := c.WaitPID(pid, true /* clearStatus */); err == nil {
+			if _, err := c.WaitPID(pid); err == nil {
 				t.Errorf("wait for stopped PID %d should fail", pid)
 			}
 		}(containers[1])
@@ -263,12 +263,12 @@ func TestExecWait(t *testing.T) {
 	}
 
 	// Get the exit status from the exec'd process.
-	if ws, err := containers[0].WaitPID(pid, true /* clearStatus */); err != nil {
+	if ws, err := containers[0].WaitPID(pid); err != nil {
 		t.Fatalf("failed to wait for process %+v with pid %d: %v", args, pid, err)
 	} else if es := ws.ExitStatus(); es != 0 {
 		t.Fatalf("process %+v exited with non-zero status %d", args, es)
 	}
-	if _, err := containers[0].WaitPID(pid, true /* clearStatus */); err == nil {
+	if _, err := containers[0].WaitPID(pid); err == nil {
 		t.Fatalf("wait for stopped process %+v should fail", args)
 	}
 }
@@ -403,7 +403,7 @@ func TestMultiContainerSignal(t *testing.T) {
 // TestMultiContainerDestroy checks that container are properly cleaned-up when
 // they are destroyed.
 func TestMultiContainerDestroy(t *testing.T) {
-	app, err := testutil.FindFile("runsc/container/test_app")
+	app, err := testutil.FindFile("runsc/container/test_app/test_app")
 	if err != nil {
 		t.Fatal("error finding test_app:", err)
 	}
@@ -533,7 +533,7 @@ func TestMultiContainerKillAll(t *testing.T) {
 		{killContainer: true},
 		{killContainer: false},
 	} {
-		app, err := testutil.FindFile("runsc/container/test_app")
+		app, err := testutil.FindFile("runsc/container/test_app/test_app")
 		if err != nil {
 			t.Fatal("error finding test_app:", err)
 		}
@@ -734,7 +734,7 @@ func TestMultiContainerDestroyStarting(t *testing.T) {
 // TestMultiContainerGoferStop tests that IO operations continue to work after
 // containers have been stopped and gofers killed.
 func TestMultiContainerGoferStop(t *testing.T) {
-	app, err := testutil.FindFile("runsc/container/test_app")
+	app, err := testutil.FindFile("runsc/container/test_app/test_app")
 	if err != nil {
 		t.Fatal("error finding test_app:", err)
 	}

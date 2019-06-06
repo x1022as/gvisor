@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@
 #include "test/util/posix_error.h"
 #include "test/util/save_util.h"
 #include "test/util/test_util.h"
+#include "test/util/time_util.h"
 
 namespace gvisor {
 namespace testing {
@@ -253,9 +254,9 @@ TEST_P(ProcSelfUidGidMapTest, MapOtherID) {
               IsPosixErrorOkAndHolds(0));
 }
 
-INSTANTIATE_TEST_CASE_P(All, ProcSelfUidGidMapTest,
-                        ::testing::ValuesIn(UidGidMapTestParams()),
-                        DescribeTestParam);
+INSTANTIATE_TEST_SUITE_P(All, ProcSelfUidGidMapTest,
+                         ::testing::ValuesIn(UidGidMapTestParams()),
+                         DescribeTestParam);
 
 TEST_P(ProcPidUidGidMapTest, MapOtherIDPrivileged) {
   // Like ProcSelfUidGidMapTest_MapOtherID, but since we have CAP_SET*ID in the
@@ -302,9 +303,9 @@ TEST_P(ProcPidUidGidMapTest, MapAnyIDsPrivileged) {
               SyscallSucceedsWithValue(sizeof(entries)));
 }
 
-INSTANTIATE_TEST_CASE_P(All, ProcPidUidGidMapTest,
-                        ::testing::ValuesIn(UidGidMapTestParams()),
-                        DescribeTestParam);
+INSTANTIATE_TEST_SUITE_P(All, ProcPidUidGidMapTest,
+                         ::testing::ValuesIn(UidGidMapTestParams()),
+                         DescribeTestParam);
 
 }  // namespace testing
 }  // namespace gvisor

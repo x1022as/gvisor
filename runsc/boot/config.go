@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -175,6 +175,11 @@ type Config struct {
 	// Network indicates what type of network to use.
 	Network NetworkType
 
+	// EnableRaw indicates whether raw sockets should be enabled. Raw
+	// sockets are disabled by stripping CAP_NET_RAW from the list of
+	// capabilities.
+	EnableRaw bool
+
 	// GSO indicates that generic segmentation offload is enabled.
 	GSO bool
 
@@ -208,6 +213,9 @@ type Config struct {
 	// ProfileEnable is set to prepare the sandbox to be profiled.
 	ProfileEnable bool
 
+	// RestoreFile is the path to the saved container image
+	RestoreFile string
+
 	// TestOnlyAllowRunAsCurrentUserWithoutChroot should only be used in
 	// tests. It allows runsc to start the sandbox process as the current
 	// user, and without chrooting the sandbox process. This can be
@@ -235,6 +243,7 @@ func (c *Config) ToFlags() []string {
 		"--watchdog-action=" + c.WatchdogAction.String(),
 		"--panic-signal=" + strconv.Itoa(c.PanicSignal),
 		"--profile=" + strconv.FormatBool(c.ProfileEnable),
+		"--net-raw=" + strconv.FormatBool(c.EnableRaw),
 	}
 	if c.TestOnlyAllowRunAsCurrentUserWithoutChroot {
 		// Only include if set since it is never to be used by users.

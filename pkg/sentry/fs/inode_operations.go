@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -117,9 +117,6 @@ type InodeOperations interface {
 	// Remove removes the given named non-directory under dir.
 	//
 	// The caller must ensure that this operation is permitted.
-	//
-	// TODO: merge Remove and RemoveDirectory, Remove
-	// just needs a type flag.
 	Remove(ctx context.Context, dir *Inode, name string) error
 
 	// RemoveDirectory removes the given named directory under dir.
@@ -131,14 +128,15 @@ type InodeOperations interface {
 	RemoveDirectory(ctx context.Context, dir *Inode, name string) error
 
 	// Rename atomically renames oldName under oldParent to newName under
-	// newParent where oldParent and newParent are directories.
+	// newParent where oldParent and newParent are directories. inode is
+	// the Inode of this InodeOperations.
 	//
 	// If replacement is true, then newName already exists and this call
 	// will replace it with oldName.
 	//
 	// Implementations are responsible for rejecting renames that replace
 	// non-empty directories.
-	Rename(ctx context.Context, oldParent *Inode, oldName string, newParent *Inode, newName string, replacement bool) error
+	Rename(ctx context.Context, inode *Inode, oldParent *Inode, oldName string, newParent *Inode, newName string, replacement bool) error
 
 	// Bind binds a new socket under dir at the given name.
 	//
@@ -160,7 +158,9 @@ type InodeOperations interface {
 	BoundEndpoint(inode *Inode, path string) transport.BoundEndpoint
 
 	// GetFile returns a new open File backed by a Dirent and FileFlags.
-	// It may block as long as it is done with ctx.
+	//
+	// Special Inode types may block using ctx.Sleeper. RegularFiles,
+	// Directories, and Symlinks must not block (see doCopyUp).
 	//
 	// The returned File will uniquely back an application fd.
 	GetFile(ctx context.Context, d *Dirent, flags FileFlags) (*File, error)
@@ -174,11 +174,11 @@ type InodeOperations interface {
 	// do not support extended attributes return EOPNOTSUPP. Inodes that
 	// support extended attributes but don't have a value at name return
 	// ENODATA.
-	Getxattr(inode *Inode, name string) ([]byte, error)
+	Getxattr(inode *Inode, name string) (string, error)
 
 	// Setxattr sets the value of extended attribute name. Inodes that
 	// do not support extended attributes return EOPNOTSUPP.
-	Setxattr(inode *Inode, name string, value []byte) error
+	Setxattr(inode *Inode, name, value string) error
 
 	// Listxattr returns the set of all extended attributes names that
 	// have values. Inodes that do not support extended attributes return
@@ -222,6 +222,10 @@ type InodeOperations interface {
 	//
 	// Implementations need not check that length >= 0.
 	Truncate(ctx context.Context, inode *Inode, size int64) error
+
+	// Allocate allows the caller to reserve disk space for the inode.
+	// It's equivalent to fallocate(2) with 'mode=0'.
+	Allocate(ctx context.Context, inode *Inode, offset int64, length int64) error
 
 	// WriteOut writes cached Inode state to a backing filesystem in a
 	// synchronous manner.

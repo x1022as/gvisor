@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -236,7 +236,7 @@ func (w *Watchdog) runTurn() {
 				if !ok {
 					// New stuck task detected.
 					//
-					// TODO: Tasks blocked doing IO may be considered stuck in kernel.
+					// TODO(b/65849403): Tasks blocked doing IO may be considered stuck in kernel.
 					tc = &offender{lastUpdateTime: lastUpdateTime}
 					stuckTasks.Increment()
 					newTaskFound = true

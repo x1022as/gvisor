@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -99,7 +99,9 @@ type Container struct {
 	// BundleDir is the directory containing the container bundle.
 	BundleDir string `json:"bundleDir"`
 
-	// Root is the directory containing the container metadata file.
+	// Root is the directory containing the container metadata file. If this
+	// container is the root container, Root and RootContainerDir will be the
+	// same.
 	Root string `json:"root"`
 
 	// CreatedAt is the time the container was created.
@@ -128,6 +130,12 @@ type Container struct {
 	// Sandbox is the sandbox this container is running in. It's set when the
 	// container is created and reset when the sandbox is destroyed.
 	Sandbox *sandbox.Sandbox `json:"sandbox"`
+
+	// RootContainerDir is the root directory containing the metadata file of the
+	// sandbox root container. It's used to lock in order to serialize creating
+	// and deleting this Container's metadata directory. If this container is the
+	// root container, this is the same as Root.
+	RootContainerDir string
 }
 
 // Load loads a container with the given id from a metadata file. id may be an
@@ -243,6 +251,12 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 		return nil, err
 	}
 
+	unlockRoot, err := maybeLockRootContainer(spec, conf.RootDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockRoot()
+
 	// Lock the container metadata file to prevent concurrent creations of
 	// containers with the same id.
 	containerRoot := filepath.Join(conf.RootDir, id)
@@ -261,14 +275,15 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 	}
 
 	c := &Container{
-		ID:            id,
-		Spec:          spec,
-		ConsoleSocket: consoleSocket,
-		BundleDir:     bundleDir,
-		Root:          containerRoot,
-		Status:        Creating,
-		CreatedAt:     time.Now(),
-		Owner:         os.Getenv("USER"),
+		ID:               id,
+		Spec:             spec,
+		ConsoleSocket:    consoleSocket,
+		BundleDir:        bundleDir,
+		Root:             containerRoot,
+		Status:           Creating,
+		CreatedAt:        time.Now(),
+		Owner:            os.Getenv("USER"),
+		RootContainerDir: conf.RootDir,
 	}
 	// The Cleanup object cleans up partially created containers when an error occurs.
 	// Any errors occuring during cleanup itself are ignored.
@@ -279,7 +294,7 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 	// started in an existing sandbox, we must do so. The metadata will
 	// indicate the ID of the sandbox, which is the same as the ID of the
 	// init container in the sandbox.
-	if specutils.ShouldCreateSandbox(spec) {
+	if isRoot(spec) {
 		log.Debugf("Creating new sandbox for container %q", id)
 
 		// Create and join cgroup before processes are created to ensure they are
@@ -354,6 +369,13 @@ func Create(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSo
 // Start starts running the containerized process inside the sandbox.
 func (c *Container) Start(conf *boot.Config) error {
 	log.Debugf("Start container %q", c.ID)
+
+	unlockRoot, err := maybeLockRootContainer(c.Spec, c.RootContainerDir)
+	if err != nil {
+		return err
+	}
+	defer unlockRoot()
+
 	unlock, err := c.lock()
 	if err != nil {
 		return err
@@ -371,7 +393,7 @@ func (c *Container) Start(conf *boot.Config) error {
 		}
 	}
 
-	if specutils.ShouldCreateSandbox(c.Spec) {
+	if isRoot(c.Spec) {
 		if err := c.Sandbox.StartRoot(c.Spec, conf); err != nil {
 			return err
 		}
@@ -418,8 +440,17 @@ func (c *Container) Restore(spec *specs.Spec, conf *boot.Config, restoreFile str
 		return err
 	}
 	defer unlock()
+
 	if err := c.requireStatus("restore", Created); err != nil {
 		return err
+	}
+
+	// "If any prestart hook fails, the runtime MUST generate an error,
+	// stop and destroy the container" -OCI spec.
+	if c.Spec.Hooks != nil {
+		if err := executeHooks(c.Spec.Hooks.Prestart, c.State()); err != nil {
+			return err
+		}
 	}
 
 	if err := c.Sandbox.Restore(c.ID, spec, conf, restoreFile); err != nil {
@@ -430,7 +461,7 @@ func (c *Container) Restore(spec *specs.Spec, conf *boot.Config, restoreFile str
 }
 
 // Run is a helper that calls Create + Start + Wait.
-func Run(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSocket, pidFile, userLog string) (syscall.WaitStatus, error) {
+func Run(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSocket, pidFile, userLog string, detach bool) (syscall.WaitStatus, error) {
 	log.Debugf("Run container %q in root dir: %s", id, conf.RootDir)
 	c, err := Create(id, spec, conf, bundleDir, consoleSocket, pidFile, userLog)
 	if err != nil {
@@ -438,10 +469,24 @@ func Run(id string, spec *specs.Spec, conf *boot.Config, bundleDir, consoleSocke
 	}
 	// Clean up partially created container if an error ocurrs.
 	// Any errors returned by Destroy() itself are ignored.
-	defer c.Destroy()
+	cu := specutils.MakeCleanup(func() {
+		c.Destroy()
+	})
+	defer cu.Clean()
 
-	if err := c.Start(conf); err != nil {
-		return 0, fmt.Errorf("starting container: %v", err)
+	if conf.RestoreFile != "" {
+		log.Debugf("Restore: %v", conf.RestoreFile)
+		if err := c.Restore(spec, conf, conf.RestoreFile); err != nil {
+			return 0, fmt.Errorf("starting container: %v", err)
+		}
+	} else {
+		if err := c.Start(conf); err != nil {
+			return 0, fmt.Errorf("starting container: %v", err)
+		}
+	}
+	if detach {
+		cu.Release()
+		return 0, nil
 	}
 	return c.Wait()
 }
@@ -485,28 +530,28 @@ func (c *Container) Wait() (syscall.WaitStatus, error) {
 
 // WaitRootPID waits for process 'pid' in the sandbox's PID namespace and
 // returns its WaitStatus.
-func (c *Container) WaitRootPID(pid int32, clearStatus bool) (syscall.WaitStatus, error) {
+func (c *Container) WaitRootPID(pid int32) (syscall.WaitStatus, error) {
 	log.Debugf("Wait on PID %d in sandbox %q", pid, c.Sandbox.ID)
 	if !c.isSandboxRunning() {
 		return 0, fmt.Errorf("sandbox is not running")
 	}
-	return c.Sandbox.WaitPID(c.Sandbox.ID, pid, clearStatus)
+	return c.Sandbox.WaitPID(c.Sandbox.ID, pid)
 }
 
 // WaitPID waits for process 'pid' in the container's PID namespace and returns
 // its WaitStatus.
-func (c *Container) WaitPID(pid int32, clearStatus bool) (syscall.WaitStatus, error) {
+func (c *Container) WaitPID(pid int32) (syscall.WaitStatus, error) {
 	log.Debugf("Wait on PID %d in container %q", pid, c.ID)
 	if !c.isSandboxRunning() {
 		return 0, fmt.Errorf("sandbox is not running")
 	}
-	return c.Sandbox.WaitPID(c.ID, pid, clearStatus)
+	return c.Sandbox.WaitPID(c.ID, pid)
 }
 
 // SignalContainer sends the signal to the container. If all is true and signal
 // is SIGKILL, then waits for all processes to exit before returning.
 // SignalContainer returns an error if the container is already stopped.
-// TODO: Distinguish different error types.
+// TODO(b/113680494): Distinguish different error types.
 func (c *Container) SignalContainer(sig syscall.Signal, all bool) error {
 	log.Debugf("Signal container %q: %v", c.ID, sig)
 	// Signaling container in Stopped state is allowed. When all=false,
@@ -643,6 +688,12 @@ func (c *Container) Destroy() error {
 	// do our best to perform all of the cleanups. Hence, we keep a slice
 	// of errors return their concatenation.
 	var errs []string
+
+	unlock, err := maybeLockRootContainer(c.Spec, c.RootContainerDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	if err := c.stop(); err != nil {
 		err = fmt.Errorf("stopping container: %v", err)
@@ -866,13 +917,18 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *boot.Config, bund
 	// Setup any uid/gid mappings, and create or join the configured user
 	// namespace so the gofer's view of the filesystem aligns with the
 	// users in the sandbox.
-	nss = append(nss, specutils.FilterNS([]specs.LinuxNamespaceType{specs.UserNamespace}, spec)...)
+	userNS := specutils.FilterNS([]specs.LinuxNamespaceType{specs.UserNamespace}, spec)
+	nss = append(nss, userNS...)
 	specutils.SetUIDGIDMappings(cmd, spec)
+	if len(userNS) != 0 {
+		// We need to set UID and GID to have capabilities in a new user namespace.
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0}
+	}
 
 	// Start the gofer in the given namespace.
 	log.Debugf("Starting gofer: %s %v", binPath, args)
 	if err := specutils.StartInNS(cmd, nss); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("Gofer: %v", err)
 	}
 	log.Infof("Gofer started, PID: %d", cmd.Process.Pid)
 	c.GoferPid = cmd.Process.Pid
@@ -953,6 +1009,33 @@ func lockContainerMetadata(containerRootDir string) (func() error, error) {
 		return nil, fmt.Errorf("acquiring lock on container lock file %q: %v", f, err)
 	}
 	return l.Unlock, nil
+}
+
+// maybeLockRootContainer locks the sandbox root container. It is used to
+// prevent races to create and delete child container sandboxes.
+func maybeLockRootContainer(spec *specs.Spec, rootDir string) (func() error, error) {
+	if isRoot(spec) {
+		return func() error { return nil }, nil
+	}
+
+	sbid, ok := specutils.SandboxID(spec)
+	if !ok {
+		return nil, fmt.Errorf("no sandbox ID found when locking root container")
+	}
+	sb, err := Load(rootDir, sbid)
+	if err != nil {
+		return nil, err
+	}
+
+	unlock, err := sb.lock()
+	if err != nil {
+		return nil, err
+	}
+	return unlock, nil
+}
+
+func isRoot(spec *specs.Spec) bool {
+	return specutils.ShouldCreateSandbox(spec)
 }
 
 // runInCgroup executes fn inside the specified cgroup. If cg is nil, execute

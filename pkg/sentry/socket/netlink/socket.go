@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,11 +65,13 @@ var netlinkSocketDevice = device.NewAnonDevice()
 //
 // +stateify savable
 type Socket struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 	socket.SendReceiveTimeout
 
 	// ports provides netlink port allocation.
@@ -167,7 +169,7 @@ func (s *Socket) EventUnregister(e *waiter.Entry) {
 
 // Ioctl implements fs.FileOperations.Ioctl.
 func (s *Socket) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
-	// TODO: no ioctls supported.
+	// TODO(b/68878065): no ioctls supported.
 	return 0, syserror.ENOTTY
 }
 
@@ -318,7 +320,7 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level int, name int, outLen int) (in
 			t.Kernel().EmitUnimplementedEvent(t)
 		}
 	}
-	// TODO: other sockopts are not supported.
+	// TODO(b/68878065): other sockopts are not supported.
 	return nil, syserr.ErrProtocolNotAvailable
 }
 
@@ -368,7 +370,7 @@ func (s *Socket) SetSockOpt(t *kernel.Task, level int, name int, opt []byte) *sy
 		}
 
 	}
-	// TODO: other sockopts are not supported.
+	// TODO(b/68878065): other sockopts are not supported.
 	return syserr.ErrProtocolNotAvailable
 }
 
@@ -388,7 +390,7 @@ func (s *Socket) GetSockName(t *kernel.Task) (interface{}, uint32, *syserr.Error
 func (s *Socket) GetPeerName(t *kernel.Task) (interface{}, uint32, *syserr.Error) {
 	sa := linux.SockAddrNetlink{
 		Family: linux.AF_NETLINK,
-		// TODO: Support non-kernel peers. For now the peer
+		// TODO(b/68878065): Support non-kernel peers. For now the peer
 		// must be the kernel.
 		PortID: 0,
 	}
@@ -396,7 +398,7 @@ func (s *Socket) GetPeerName(t *kernel.Task) (interface{}, uint32, *syserr.Error
 }
 
 // RecvMsg implements socket.Socket.RecvMsg.
-func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
+func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (int, int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
 	from := linux.SockAddrNetlink{
 		Family: linux.AF_NETLINK,
 		PortID: 0,
@@ -411,10 +413,14 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 	}
 
 	if n, err := dst.CopyOutFrom(t, &r); err != syserror.ErrWouldBlock || flags&linux.MSG_DONTWAIT != 0 {
+		var mflags int
+		if n < int64(r.MsgSize) {
+			mflags |= linux.MSG_TRUNC
+		}
 		if trunc {
 			n = int64(r.MsgSize)
 		}
-		return int(n), from, fromLen, socket.ControlMessages{}, syserr.FromError(err)
+		return int(n), mflags, from, fromLen, socket.ControlMessages{}, syserr.FromError(err)
 	}
 
 	// We'll have to block. Register for notification and keep trying to
@@ -425,17 +431,21 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 
 	for {
 		if n, err := dst.CopyOutFrom(t, &r); err != syserror.ErrWouldBlock {
+			var mflags int
+			if n < int64(r.MsgSize) {
+				mflags |= linux.MSG_TRUNC
+			}
 			if trunc {
 				n = int64(r.MsgSize)
 			}
-			return int(n), from, fromLen, socket.ControlMessages{}, syserr.FromError(err)
+			return int(n), mflags, from, fromLen, socket.ControlMessages{}, syserr.FromError(err)
 		}
 
 		if err := t.BlockWithDeadline(ch, haveDeadline, deadline); err != nil {
 			if err == syserror.ETIMEDOUT {
-				return 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
+				return 0, 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
 			}
-			return 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
+			return 0, 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
 		}
 	}
 }
@@ -531,7 +541,7 @@ func (s *Socket) processMessages(ctx context.Context, buf []byte) *syserr.Error 
 			continue
 		}
 
-		// TODO: ACKs not supported yet.
+		// TODO(b/68877377): ACKs not supported yet.
 		if hdr.Flags&linux.NLM_F_ACK == linux.NLM_F_ACK {
 			return syserr.ErrNotSupported
 		}

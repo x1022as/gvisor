@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -356,6 +356,6 @@ type MMapOpts struct {
 	// Hint is the name used for the mapping in /proc/[pid]/maps. If Hint is
 	// empty, MappingIdentity.MappedName() will be used instead.
 	//
-	// TODO: Replace entirely with MappingIdentity?
+	// TODO(jamieliu): Replace entirely with MappingIdentity?
 	Hint string
 }

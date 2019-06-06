@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -154,7 +154,7 @@ func (n *netDev) ReadSeqFileData(ctx context.Context, h seqfile.SeqHandle) ([]se
 	contents[1] = " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
 
 	for _, i := range interfaces {
-		// TODO: Collect stats from each inet.Stack
+		// TODO(b/71872867): Collect stats from each inet.Stack
 		// implementation (hostinet, epsocket, and rpcinet).
 
 		// Implements the same format as

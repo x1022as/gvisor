@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -91,7 +91,7 @@ func readDescriptors(t *kernel.Task, c *fs.DirCtx, offset int64, toDentAttr func
 // fd implements fs.InodeOperations for a file in /proc/TID/fd/.
 type fd struct {
 	ramfs.Symlink
-	*fs.File
+	file *fs.File
 }
 
 var _ fs.InodeOperations = (*fd)(nil)
@@ -103,7 +103,7 @@ func newFd(t *kernel.Task, f *fs.File, msrc *fs.MountSource) *fs.Inode {
 	fd := &fd{
 		// RootOwner overridden by taskOwnedInodeOps.UnstableAttrs().
 		Symlink: *ramfs.NewSymlink(t, fs.RootOwner, ""),
-		File:    f,
+		file:    f,
 	}
 	return newProcInode(fd, msrc, fs.Symlink, t)
 }
@@ -112,22 +112,24 @@ func newFd(t *kernel.Task, f *fs.File, msrc *fs.MountSource) *fs.Inode {
 // arguments are ignored.
 func (f *fd) GetFile(context.Context, *fs.Dirent, fs.FileFlags) (*fs.File, error) {
 	// Take a reference on the fs.File.
-	f.File.IncRef()
-	return f.File, nil
+	f.file.IncRef()
+	return f.file, nil
 }
 
 // Readlink returns the current target.
 func (f *fd) Readlink(ctx context.Context, _ *fs.Inode) (string, error) {
 	root := fs.RootFromContext(ctx)
-	defer root.DecRef()
-	n, _ := f.Dirent.FullName(root)
+	if root != nil {
+		defer root.DecRef()
+	}
+	n, _ := f.file.Dirent.FullName(root)
 	return n, nil
 }
 
 // Getlink implements fs.InodeOperations.Getlink.
 func (f *fd) Getlink(context.Context, *fs.Inode) (*fs.Dirent, error) {
-	f.Dirent.IncRef()
-	return f.Dirent, nil
+	f.file.Dirent.IncRef()
+	return f.file.Dirent, nil
 }
 
 // Truncate is ignored.
@@ -137,12 +139,12 @@ func (f *fd) Truncate(context.Context, *fs.Inode, int64) error {
 
 func (f *fd) Release(ctx context.Context) {
 	f.Symlink.Release(ctx)
-	f.File.DecRef()
+	f.file.DecRef()
 }
 
 // Close releases the reference on the file.
 func (f *fd) Close() error {
-	f.DecRef()
+	f.file.DecRef()
 	return nil
 }
 
@@ -210,7 +212,8 @@ func (f *fdDir) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFla
 
 // +stateify savable
 type fdDirFile struct {
-	fsutil.DirFileOperations `state:"nosave"`
+	fsutil.DirFileOperations        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	isInfoFile bool
 
@@ -231,24 +234,6 @@ func (f *fdDirFile) Readdir(ctx context.Context, file *fs.File, ser fs.DentrySer
 	return readDescriptors(f.t, dirCtx, file.Offset(), func(fd int) fs.DentAttr {
 		return fs.GenericDentAttr(typ, device.ProcDevice)
 	})
-}
-
-// fdInfoInode is a single file in /proc/TID/fdinfo/.
-//
-// +stateify savable
-type fdInfoInode struct {
-	staticFileInodeOps
-
-	file    *fs.File
-	flags   fs.FileFlags
-	fdFlags kernel.FDFlags
-}
-
-var _ fs.InodeOperations = (*fdInfoInode)(nil)
-
-// Release implements fs.InodeOperations.Release.
-func (f *fdInfoInode) Release(ctx context.Context) {
-	f.file.DecRef()
 }
 
 // fdInfoDir implements /proc/TID/fdinfo.  It embeds an fdDir, but overrides
@@ -273,13 +258,14 @@ func newFdInfoDir(t *kernel.Task, msrc *fs.MountSource) *fs.Inode {
 // Lookup loads an fd in /proc/TID/fdinfo into a Dirent.
 func (fdid *fdInfoDir) Lookup(ctx context.Context, dir *fs.Inode, p string) (*fs.Dirent, error) {
 	inode, err := walkDescriptors(fdid.t, p, func(file *fs.File, fdFlags kernel.FDFlags) *fs.Inode {
-		// TODO: Using a static inode here means that the
+		// TODO(b/121266871): Using a static inode here means that the
 		// data can be out-of-date if, for instance, the flags on the
 		// FD change before we read this file. We should switch to
 		// generating the data on Read(). Also, we should include pos,
 		// locks, and other data.  For now we only have flags.
 		// See https://www.kernel.org/doc/Documentation/filesystems/proc.txt
 		flags := file.Flags().ToLinux() | fdFlags.ToLinuxFileFlags()
+		file.DecRef()
 		contents := []byte(fmt.Sprintf("flags:\t0%o\n", flags))
 		return newStaticProcInode(ctx, dir.MountSource, contents)
 	})

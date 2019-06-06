@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 )
 
-// TODO: Move to pkg/abi/linux along with definitions in
+// TODO(b/34161764): Move to pkg/abi/linux along with definitions in
 // pkg/sentry/arch.
 type sigaction struct {
 	handler  uintptr

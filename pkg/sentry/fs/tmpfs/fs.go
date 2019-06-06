@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ const (
 	// GID for the root directory.
 	rootGIDKey = "gid"
 
-	// TODO: support a tmpfs size limit.
+	// TODO(edahlgren/mpratt): support a tmpfs size limit.
 	// size = "size"
 
 	// Permissions that exceed modeMask will be rejected.

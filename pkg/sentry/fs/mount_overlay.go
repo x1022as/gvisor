@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,10 +31,19 @@ type overlayMountSourceOperations struct {
 func newOverlayMountSource(upper, lower *MountSource, flags MountSourceFlags) *MountSource {
 	upper.IncRef()
 	lower.IncRef()
-	return NewMountSource(&overlayMountSourceOperations{
+	msrc := NewMountSource(&overlayMountSourceOperations{
 		upper: upper,
 		lower: lower,
 	}, &overlayFilesystem{}, flags)
+
+	// Use the minimum number to keep resource usage under limits.
+	size := lower.fscache.maxSize
+	if size > upper.fscache.maxSize {
+		size = upper.fscache.maxSize
+	}
+	msrc.fscache.setMaxSize(size)
+
+	return msrc
 }
 
 // Revalidate implements MountSourceOperations.Revalidate for an overlay by

@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,16 +18,8 @@ package fdbased
 
 import "gvisor.googlesource.com/gvisor/pkg/tcpip"
 
-// Stubbed out versions for non-linux/non-amd64 platforms.
+// Stubbed out version for non-linux/non-amd64 platforms.
 
-func (e *endpoint) setupPacketRXRing() error {
-	return nil
-}
-
-func (e *endpoint) readMMappedPacket() ([]byte, *tcpip.Error) {
+func newPacketMMapDispatcher(fd int, e *endpoint) (linkDispatcher, *tcpip.Error) {
 	return nil, nil
-}
-
-func (e *endpoint) packetMMapDispatch() (bool, *tcpip.Error) {
-	return false, nil
 }

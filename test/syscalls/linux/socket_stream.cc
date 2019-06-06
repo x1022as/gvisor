@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -79,6 +79,33 @@ TEST_P(StreamSocketPairTest, WriteOneSideClosed) {
   const char str[] = "abc";
   ASSERT_THAT(write(sockets->second_fd(), str, 3),
               SyscallFailsWithErrno(EPIPE));
+}
+
+TEST_P(StreamSocketPairTest, RecvmsgMsghdrFlagsNoMsgTrunc) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  char sent_data[10];
+  RandomizeBuffer(sent_data, sizeof(sent_data));
+  ASSERT_THAT(
+      RetryEINTR(send)(sockets->first_fd(), sent_data, sizeof(sent_data), 0),
+      SyscallSucceedsWithValue(sizeof(sent_data)));
+
+  char received_data[sizeof(sent_data) / 2] = {};
+
+  struct iovec iov;
+  iov.iov_base = received_data;
+  iov.iov_len = sizeof(received_data);
+  struct msghdr msg = {};
+  msg.msg_flags = -1;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+
+  ASSERT_THAT(RetryEINTR(recvmsg)(sockets->second_fd(), &msg, 0),
+              SyscallSucceedsWithValue(sizeof(received_data)));
+  EXPECT_EQ(0, memcmp(received_data, sent_data, sizeof(received_data)));
+
+  // Check that msghdr flags were cleared (MSG_TRUNC was not set).
+  EXPECT_EQ(msg.msg_flags, 0);
 }
 
 TEST_P(StreamSocketPairTest, MsgTrunc) {

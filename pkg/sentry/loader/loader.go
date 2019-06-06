@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,9 +70,9 @@ func openPath(ctx context.Context, mm *fs.MountNamespace, root, wd *fs.Dirent, m
 	defer d.DecRef()
 
 	perms := fs.PermMask{
-		// TODO: Linux requires only execute permission,
-		// not read. However, our backing filesystems may prevent us
-		// from reading the file without read permission.
+		// TODO(gvisor.dev/issue/160): Linux requires only execute
+		// permission, not read. However, our backing filesystems may
+		// prevent us from reading the file without read permission.
 		//
 		// Additionally, a task with a non-readable executable has
 		// additional constraints on access via ptrace and procfs.

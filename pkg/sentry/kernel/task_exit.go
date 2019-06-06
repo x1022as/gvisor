@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -339,7 +339,7 @@ func (t *Task) exitChildren() {
 			}, true /* group */)
 			other.signalHandlers.mu.Unlock()
 		}
-		// TODO: The init process waits for all processes in the
+		// TODO(b/37722272): The init process waits for all processes in the
 		// namespace to exit before completing its own exit
 		// (kernel/pid_namespace.c:zap_pid_ns_processes()). Stop until all
 		// other tasks in the namespace are dead, except possibly for this
@@ -692,7 +692,7 @@ func (t *Task) exitNotificationSignal(sig linux.Signal, receiver *Task) *arch.Si
 		info.Code = arch.CLD_EXITED
 		info.SetStatus(int32(t.exitStatus.Code))
 	}
-	// TODO: Set utime, stime.
+	// TODO(b/72102453): Set utime, stime.
 	return info
 }
 
@@ -782,6 +782,10 @@ type WaitOptions struct {
 	// for.
 	CloneTasks bool
 
+	// If SiblingChildren is true, events from children tasks of any task
+	// in the thread group of the waiter are eligible to be waited for.
+	SiblingChildren bool
+
 	// Events is a bitwise combination of the events defined above that specify
 	// what events are of interest to the call to Wait.
 	Events waiter.EventMask
@@ -799,12 +803,16 @@ type WaitOptions struct {
 }
 
 // Preconditions: The TaskSet mutex must be locked (for reading or writing).
-func (o *WaitOptions) matchesTask(t *Task, pidns *PIDNamespace) bool {
+func (o *WaitOptions) matchesTask(t *Task, pidns *PIDNamespace, tracee bool) bool {
 	if o.SpecificTID != 0 && o.SpecificTID != pidns.tids[t] {
 		return false
 	}
 	if o.SpecificPGID != 0 && o.SpecificPGID != pidns.pgids[t.tg.processGroup] {
 		return false
+	}
+	// Tracees are always eligible.
+	if tracee {
+		return true
 	}
 	if t == t.tg.leader && t.tg.terminationSignal == linux.SIGCHLD {
 		return o.NonCloneTasks
@@ -869,80 +877,22 @@ func (t *Task) waitOnce(opts *WaitOptions) (*WaitResult, error) {
 	t.tg.pidns.owner.mu.Lock()
 	defer t.tg.pidns.owner.mu.Unlock()
 
-	// Without the (unimplemented) __WNOTHREAD flag, a task can wait on the
-	// children and tracees of any task in the same thread group.
-	for parent := t.tg.tasks.Front(); parent != nil; parent = parent.Next() {
-		for child := range parent.children {
-			if !opts.matchesTask(child, parent.tg.pidns) {
-				continue
+	if opts.SiblingChildren {
+		// We can wait on the children and tracees of any task in the
+		// same thread group.
+		for parent := t.tg.tasks.Front(); parent != nil; parent = parent.Next() {
+			wr, any := t.waitParentLocked(opts, parent)
+			if wr != nil {
+				return wr, nil
 			}
-			// Non-leaders don't notify parents on exit and aren't eligible to
-			// be waited on.
-			if opts.Events&EventExit != 0 && child == child.tg.leader && !child.exitParentAcked {
-				anyWaitableTasks = true
-				if wr := t.waitCollectZombieLocked(child, opts, false); wr != nil {
-					return wr, nil
-				}
-			}
-			// Check for group stops and continues. Tasks that have passed
-			// TaskExitInitiated can no longer participate in group stops.
-			if opts.Events&(EventChildGroupStop|EventGroupContinue) == 0 {
-				continue
-			}
-			if child.exitState >= TaskExitInitiated {
-				continue
-			}
-			// If the waiter is in the same thread group as the task's
-			// tracer, do not report its group stops; they will be reported
-			// as ptrace stops instead. This also skips checking for group
-			// continues, but they'll be checked for when scanning tracees
-			// below. (Per kernel/exit.c:wait_consider_task(): "If a
-			// ptracer wants to distinguish the two events for its own
-			// children, it should create a separate process which takes
-			// the role of real parent.")
-			if tracer := child.Tracer(); tracer != nil && tracer.tg == parent.tg {
-				continue
-			}
-			anyWaitableTasks = true
-			if opts.Events&EventChildGroupStop != 0 {
-				if wr := t.waitCollectChildGroupStopLocked(child, opts); wr != nil {
-					return wr, nil
-				}
-			}
-			if opts.Events&EventGroupContinue != 0 {
-				if wr := t.waitCollectGroupContinueLocked(child, opts); wr != nil {
-					return wr, nil
-				}
-			}
+			anyWaitableTasks = anyWaitableTasks || any
 		}
-		for tracee := range parent.ptraceTracees {
-			if !opts.matchesTask(tracee, parent.tg.pidns) {
-				continue
-			}
-			// Non-leaders do notify tracers on exit.
-			if opts.Events&EventExit != 0 && !tracee.exitTracerAcked {
-				anyWaitableTasks = true
-				if wr := t.waitCollectZombieLocked(tracee, opts, true); wr != nil {
-					return wr, nil
-				}
-			}
-			if opts.Events&(EventTraceeStop|EventGroupContinue) == 0 {
-				continue
-			}
-			if tracee.exitState >= TaskExitInitiated {
-				continue
-			}
-			anyWaitableTasks = true
-			if opts.Events&EventTraceeStop != 0 {
-				if wr := t.waitCollectTraceeStopLocked(tracee, opts); wr != nil {
-					return wr, nil
-				}
-			}
-			if opts.Events&EventGroupContinue != 0 {
-				if wr := t.waitCollectGroupContinueLocked(tracee, opts); wr != nil {
-					return wr, nil
-				}
-			}
+	} else {
+		// We can only wait on this task.
+		var wr *WaitResult
+		wr, anyWaitableTasks = t.waitParentLocked(opts, t)
+		if wr != nil {
+			return wr, nil
 		}
 	}
 
@@ -950,6 +900,86 @@ func (t *Task) waitOnce(opts *WaitOptions) (*WaitResult, error) {
 		return nil, ErrNoWaitableEvent
 	}
 	return nil, syserror.ECHILD
+}
+
+// Preconditions: The TaskSet mutex must be locked for writing.
+func (t *Task) waitParentLocked(opts *WaitOptions, parent *Task) (*WaitResult, bool) {
+	anyWaitableTasks := false
+
+	for child := range parent.children {
+		if !opts.matchesTask(child, parent.tg.pidns, false) {
+			continue
+		}
+		// Non-leaders don't notify parents on exit and aren't eligible to
+		// be waited on.
+		if opts.Events&EventExit != 0 && child == child.tg.leader && !child.exitParentAcked {
+			anyWaitableTasks = true
+			if wr := t.waitCollectZombieLocked(child, opts, false); wr != nil {
+				return wr, anyWaitableTasks
+			}
+		}
+		// Check for group stops and continues. Tasks that have passed
+		// TaskExitInitiated can no longer participate in group stops.
+		if opts.Events&(EventChildGroupStop|EventGroupContinue) == 0 {
+			continue
+		}
+		if child.exitState >= TaskExitInitiated {
+			continue
+		}
+		// If the waiter is in the same thread group as the task's
+		// tracer, do not report its group stops; they will be reported
+		// as ptrace stops instead. This also skips checking for group
+		// continues, but they'll be checked for when scanning tracees
+		// below. (Per kernel/exit.c:wait_consider_task(): "If a
+		// ptracer wants to distinguish the two events for its own
+		// children, it should create a separate process which takes
+		// the role of real parent.")
+		if tracer := child.Tracer(); tracer != nil && tracer.tg == parent.tg {
+			continue
+		}
+		anyWaitableTasks = true
+		if opts.Events&EventChildGroupStop != 0 {
+			if wr := t.waitCollectChildGroupStopLocked(child, opts); wr != nil {
+				return wr, anyWaitableTasks
+			}
+		}
+		if opts.Events&EventGroupContinue != 0 {
+			if wr := t.waitCollectGroupContinueLocked(child, opts); wr != nil {
+				return wr, anyWaitableTasks
+			}
+		}
+	}
+	for tracee := range parent.ptraceTracees {
+		if !opts.matchesTask(tracee, parent.tg.pidns, true) {
+			continue
+		}
+		// Non-leaders do notify tracers on exit.
+		if opts.Events&EventExit != 0 && !tracee.exitTracerAcked {
+			anyWaitableTasks = true
+			if wr := t.waitCollectZombieLocked(tracee, opts, true); wr != nil {
+				return wr, anyWaitableTasks
+			}
+		}
+		if opts.Events&(EventTraceeStop|EventGroupContinue) == 0 {
+			continue
+		}
+		if tracee.exitState >= TaskExitInitiated {
+			continue
+		}
+		anyWaitableTasks = true
+		if opts.Events&EventTraceeStop != 0 {
+			if wr := t.waitCollectTraceeStopLocked(tracee, opts); wr != nil {
+				return wr, anyWaitableTasks
+			}
+		}
+		if opts.Events&EventGroupContinue != 0 {
+			if wr := t.waitCollectGroupContinueLocked(tracee, opts); wr != nil {
+				return wr, anyWaitableTasks
+			}
+		}
+	}
+
+	return nil, anyWaitableTasks
 }
 
 // Preconditions: The TaskSet mutex must be locked for writing.

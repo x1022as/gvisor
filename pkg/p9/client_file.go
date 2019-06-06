@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -169,6 +169,18 @@ func (c *clientFile) SetAttr(valid SetAttrMask, attr SetAttr) error {
 	}
 
 	return c.client.sendRecv(&Tsetattr{FID: c.fid, Valid: valid, SetAttr: attr}, &Rsetattr{})
+}
+
+// Allocate implements File.Allocate.
+func (c *clientFile) Allocate(mode AllocateMode, offset, length uint64) error {
+	if atomic.LoadUint32(&c.closed) != 0 {
+		return syscall.EBADF
+	}
+	if !versionSupportsTallocate(c.client.version) {
+		return syscall.EOPNOTSUPP
+	}
+
+	return c.client.sendRecv(&Tallocate{FID: c.fid, Mode: mode, Offset: offset, Length: length}, &Rallocate{})
 }
 
 // Remove implements File.Remove.
@@ -521,18 +533,18 @@ func (c *clientFile) Link(target File, newname string) error {
 }
 
 // Mknod implements File.Mknod.
-func (c *clientFile) Mknod(name string, permissions FileMode, major uint32, minor uint32, uid UID, gid GID) (QID, error) {
+func (c *clientFile) Mknod(name string, mode FileMode, major uint32, minor uint32, uid UID, gid GID) (QID, error) {
 	if atomic.LoadUint32(&c.closed) != 0 {
 		return QID{}, syscall.EBADF
 	}
 
 	msg := Tmknod{
-		Directory:   c.fid,
-		Name:        name,
-		Permissions: permissions,
-		Major:       major,
-		Minor:       minor,
-		GID:         NoGID,
+		Directory: c.fid,
+		Name:      name,
+		Mode:      mode,
+		Major:     major,
+		Minor:     minor,
+		GID:       NoGID,
 	}
 
 	if versionSupportsTucreation(c.client.version) {

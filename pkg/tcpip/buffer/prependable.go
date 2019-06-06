@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,6 +50,16 @@ func (p Prependable) View() View {
 // UsedLength returns the number of bytes used so far.
 func (p Prependable) UsedLength() int {
 	return len(p.buf) - p.usedIdx
+}
+
+// AvailableLength returns the number of bytes used so far.
+func (p Prependable) AvailableLength() int {
+	return p.usedIdx
+}
+
+// TrimBack removes size bytes from the end.
+func (p *Prependable) TrimBack(size int) {
+	p.buf = p.buf[:len(p.buf)-size]
 }
 
 // Prepend reserves the requested space in front of the buffer, returning a

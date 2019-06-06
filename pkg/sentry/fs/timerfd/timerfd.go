@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,12 +33,14 @@ import (
 //
 // +stateify savable
 type TimerOperations struct {
-	fsutil.FileZeroSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
+	fsutil.FileZeroSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	events waiter.Queue `state:"zerovalue"`
 	timer  *ktime.Timer
@@ -52,6 +54,8 @@ type TimerOperations struct {
 // NewFile returns a timerfd File that receives time from c.
 func NewFile(ctx context.Context, c ktime.Clock) *fs.File {
 	dirent := fs.NewDirent(anon.NewInode(ctx), "anon_inode:[timerfd]")
+	// Release the initial dirent reference after NewFile takes a reference.
+	defer dirent.DecRef()
 	tops := &TimerOperations{}
 	tops.timer = ktime.NewTimer(c, tops)
 	// Timerfds reject writes, but the Write flag must be set in order to

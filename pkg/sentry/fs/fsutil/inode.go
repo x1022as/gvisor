@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ type SimpleFileInode struct {
 	InodeNoExtendedAttributes `state:"nosave"`
 	InodeNoopRelease          `state:"nosave"`
 	InodeNoopWriteOut         `state:"nosave"`
+	InodeNotAllocatable       `state:"nosave"`
 	InodeNotDirectory         `state:"nosave"`
 	InodeNotMappable          `state:"nosave"`
 	InodeNotOpenable          `state:"nosave"`
@@ -61,6 +62,7 @@ type NoReadWriteFileInode struct {
 	InodeNoExtendedAttributes `state:"nosave"`
 	InodeNoopRelease          `state:"nosave"`
 	InodeNoopWriteOut         `state:"nosave"`
+	InodeNotAllocatable       `state:"nosave"`
 	InodeNotDirectory         `state:"nosave"`
 	InodeNotMappable          `state:"nosave"`
 	InodeNotSocket            `state:"nosave"`
@@ -190,6 +192,16 @@ func (i *InodeSimpleAttributes) NotifyStatusChange(ctx context.Context) {
 	i.mu.Unlock()
 }
 
+// NotifyModificationAndStatusChange updates the modification and status change
+// times.
+func (i *InodeSimpleAttributes) NotifyModificationAndStatusChange(ctx context.Context) {
+	i.mu.Lock()
+	now := ktime.NowFromContext(ctx)
+	i.unstable.ModificationTime = now
+	i.unstable.StatusChangeTime = now
+	i.mu.Unlock()
+}
+
 // InodeSimpleExtendedAttributes implements
 // fs.InodeOperations.{Get,Set,List}xattr.
 //
@@ -197,25 +209,25 @@ func (i *InodeSimpleAttributes) NotifyStatusChange(ctx context.Context) {
 type InodeSimpleExtendedAttributes struct {
 	// mu protects xattrs.
 	mu     sync.RWMutex `state:"nosave"`
-	xattrs map[string][]byte
+	xattrs map[string]string
 }
 
 // Getxattr implements fs.InodeOperations.Getxattr.
-func (i *InodeSimpleExtendedAttributes) Getxattr(_ *fs.Inode, name string) ([]byte, error) {
+func (i *InodeSimpleExtendedAttributes) Getxattr(_ *fs.Inode, name string) (string, error) {
 	i.mu.RLock()
 	value, ok := i.xattrs[name]
 	i.mu.RUnlock()
 	if !ok {
-		return nil, syserror.ENOATTR
+		return "", syserror.ENOATTR
 	}
 	return value, nil
 }
 
 // Setxattr implements fs.InodeOperations.Setxattr.
-func (i *InodeSimpleExtendedAttributes) Setxattr(_ *fs.Inode, name string, value []byte) error {
+func (i *InodeSimpleExtendedAttributes) Setxattr(_ *fs.Inode, name, value string) error {
 	i.mu.Lock()
 	if i.xattrs == nil {
-		i.xattrs = make(map[string][]byte)
+		i.xattrs = make(map[string]string)
 	}
 	i.xattrs[name] = value
 	i.mu.Unlock()
@@ -238,15 +250,17 @@ func (i *InodeSimpleExtendedAttributes) Listxattr(_ *fs.Inode) (map[string]struc
 //
 // +stateify savable
 type staticFile struct {
-	waiter.AlwaysReady `state:"nosave"`
-	FileGenericSeek    `state:"nosave"`
-	FileNoIoctl        `state:"nosave"`
-	FileNoMMap         `state:"nosave"`
-	FileNoopFsync      `state:"nosave"`
-	FileNoopFlush      `state:"nosave"`
-	FileNoopRelease    `state:"nosave"`
-	FileNoopWrite      `state:"nosave"`
-	FileNotDirReaddir  `state:"nosave"`
+	FileGenericSeek          `state:"nosave"`
+	FileNoIoctl              `state:"nosave"`
+	FileNoMMap               `state:"nosave"`
+	FileNoSplice             `state:"nosave"`
+	FileNoopFsync            `state:"nosave"`
+	FileNoopFlush            `state:"nosave"`
+	FileNoopRelease          `state:"nosave"`
+	FileNoopWrite            `state:"nosave"`
+	FileNotDirReaddir        `state:"nosave"`
+	FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady       `state:"nosave"`
 
 	FileStaticContentReader
 }
@@ -338,7 +352,7 @@ func (InodeNotDirectory) RemoveDirectory(context.Context, *fs.Inode, string) err
 }
 
 // Rename implements fs.FileOperations.Rename.
-func (InodeNotDirectory) Rename(context.Context, *fs.Inode, string, *fs.Inode, string, bool) error {
+func (InodeNotDirectory) Rename(context.Context, *fs.Inode, *fs.Inode, string, *fs.Inode, string, bool) error {
 	return syserror.EINVAL
 }
 
@@ -378,7 +392,7 @@ func (InodeNoopTruncate) Truncate(context.Context, *fs.Inode, int64) error {
 type InodeNotRenameable struct{}
 
 // Rename implements fs.InodeOperations.Rename.
-func (InodeNotRenameable) Rename(context.Context, *fs.Inode, string, *fs.Inode, string, bool) error {
+func (InodeNotRenameable) Rename(context.Context, *fs.Inode, *fs.Inode, string, *fs.Inode, string, bool) error {
 	return syserror.EINVAL
 }
 
@@ -424,12 +438,12 @@ func (InodeNotSymlink) Getlink(context.Context, *fs.Inode) (*fs.Dirent, error) {
 type InodeNoExtendedAttributes struct{}
 
 // Getxattr implements fs.InodeOperations.Getxattr.
-func (InodeNoExtendedAttributes) Getxattr(*fs.Inode, string) ([]byte, error) {
-	return nil, syserror.EOPNOTSUPP
+func (InodeNoExtendedAttributes) Getxattr(*fs.Inode, string) (string, error) {
+	return "", syserror.EOPNOTSUPP
 }
 
 // Setxattr implements fs.InodeOperations.Setxattr.
-func (InodeNoExtendedAttributes) Setxattr(*fs.Inode, string, []byte) error {
+func (InodeNoExtendedAttributes) Setxattr(*fs.Inode, string, string) error {
 	return syserror.EOPNOTSUPP
 }
 
@@ -451,4 +465,39 @@ type InodeGenericChecker struct{}
 // Check implements fs.InodeOperations.Check.
 func (InodeGenericChecker) Check(ctx context.Context, inode *fs.Inode, p fs.PermMask) bool {
 	return fs.ContextCanAccessFile(ctx, inode, p)
+}
+
+// InodeDenyWriteChecker implements fs.InodeOperations.Check which denies all
+// write operations.
+type InodeDenyWriteChecker struct{}
+
+// Check implements fs.InodeOperations.Check.
+func (InodeDenyWriteChecker) Check(ctx context.Context, inode *fs.Inode, p fs.PermMask) bool {
+	if p.Write {
+		return false
+	}
+	return fs.ContextCanAccessFile(ctx, inode, p)
+}
+
+//InodeNotAllocatable can be used by Inodes that do not support Allocate().
+type InodeNotAllocatable struct{}
+
+func (InodeNotAllocatable) Allocate(_ context.Context, _ *fs.Inode, _, _ int64) error {
+	return syserror.EOPNOTSUPP
+}
+
+// InodeNoopAllocate implements fs.InodeOperations.Allocate as a noop.
+type InodeNoopAllocate struct{}
+
+// Allocate implements fs.InodeOperations.Allocate.
+func (InodeNoopAllocate) Allocate(_ context.Context, _ *fs.Inode, _, _ int64) error {
+	return nil
+}
+
+// InodeIsDirAllocate implements fs.InodeOperations.Allocate for directories.
+type InodeIsDirAllocate struct{}
+
+// Allocate implements fs.InodeOperations.Allocate.
+func (InodeIsDirAllocate) Allocate(_ context.Context, _ *fs.Inode, _, _ int64) error {
+	return syserror.EISDIR
 }

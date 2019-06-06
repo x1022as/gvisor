@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,15 +54,17 @@ func (u *uptime) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFl
 
 // +stateify savable
 type uptimeFile struct {
-	waiter.AlwaysReady       `state:"nosave"`
-	fsutil.FileGenericSeek   `state:"nosave"`
-	fsutil.FileNoIoctl       `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoopFsync     `state:"nosave"`
-	fsutil.FileNoopRelease   `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoWrite       `state:"nosave"`
+	fsutil.FileGenericSeek          `state:"nosave"`
+	fsutil.FileNoIoctl              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoWrite              `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileNoopFsync            `state:"nosave"`
+	fsutil.FileNoopRelease          `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+	waiter.AlwaysReady              `state:"nosave"`
 
 	startTime ktime.Time
 }

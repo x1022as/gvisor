@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -160,7 +160,7 @@ PosixError errorFromReturn(const std::string& name, int ret) {
   return NoError();
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     ChownKinds, ChownParamTest,
     ::testing::Values(
         [](const std::string& path, uid_t owner, gid_t group) -> PosixError {

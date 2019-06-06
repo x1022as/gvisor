@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,16 +40,16 @@ std::vector<SocketPairKind> GetSocketPairs() {
                                  List<int>{0, SOCK_NONBLOCK}))));
 }
 
-INSTANTIATE_TEST_CASE_P(
-    AllUnixDomainSockets, DgramUnixSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    DgramUnixSockets, DgramUnixSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
 
-INSTANTIATE_TEST_CASE_P(
-    AllUnixDomainSockets, UnixNonStreamSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    DgramUnixSockets, UnixNonStreamSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
 
-INSTANTIATE_TEST_CASE_P(
-    AllUnixDomainSockets, NonStreamSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    DgramUnixSockets, NonStreamSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
 
 }  // namespace testing

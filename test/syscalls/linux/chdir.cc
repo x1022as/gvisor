@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -52,11 +52,6 @@ TEST(ChdirTest, PermissionDenied) {
 TEST(ChdirTest, NotDir) {
   auto temp_file = ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateFile());
   EXPECT_THAT(chdir(temp_file.path().c_str()), SyscallFailsWithErrno(ENOTDIR));
-}
-
-TEST(ChdirTest, NameTooLong) {
-  std::string name(NAME_MAX + 1, 'a');
-  ASSERT_THAT(chdir(name.c_str()), SyscallFailsWithErrno(ENAMETOOLONG));
 }
 
 TEST(ChdirTest, NotExist) {

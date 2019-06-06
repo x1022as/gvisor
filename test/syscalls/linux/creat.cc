@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,6 +49,17 @@ TEST(CreatTest, CreatTruncatesExistingFile) {
   std::string new_contents;
   ASSERT_NO_ERRNO(GetContents(temp_path.path(), &new_contents));
   EXPECT_EQ("", new_contents);
+}
+
+TEST(CreatTest, CreatWithNameTooLong) {
+  // Start with a unique name, and pad it to NAME_MAX + 1;
+  std::string name = NewTempRelPath();
+  int padding = (NAME_MAX + 1) - name.size();
+  name.append(padding, 'x');
+  const std::string& path = JoinPath(GetAbsoluteTestTmpdir(), name);
+
+  // Creation should return ENAMETOOLONG.
+  ASSERT_THAT(creat(path.c_str(), kMode), SyscallFailsWithErrno(ENAMETOOLONG));
 }
 
 }  // namespace

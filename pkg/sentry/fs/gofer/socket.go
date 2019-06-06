@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -138,4 +138,9 @@ func (e *endpoint) UnidirectionalConnect() (transport.ConnectedEndpoint, *syserr
 // Release implements transport.BoundEndpoint.Release.
 func (e *endpoint) Release() {
 	e.inode.DecRef()
+}
+
+// Passcred implements transport.BoundEndpoint.Passcred.
+func (e *endpoint) Passcred() bool {
+	return false
 }

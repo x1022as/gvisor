@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,9 @@ const (
 
 	// Oct is just an octal number.
 	Oct
+
+	// FD is a file descriptor.
+	FD
 
 	// ReadBuffer is a buffer for a read-style call. The syscall return
 	// value is used for the length.
@@ -199,6 +202,10 @@ const (
 	// PostCapData is the data argument to capget(2)/capset(2), formatted
 	// after syscall execution. The previous argument must be CapHeader.
 	PostCapData
+
+	// PollFDs is an array of struct pollfd. The number of entries in the
+	// array is in the next argument.
+	PollFDs
 )
 
 // defaultFormat is the syscall argument format to use if the actual format is

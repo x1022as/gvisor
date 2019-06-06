@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ func newSlaveInode(ctx context.Context, d *dirInodeOperations, t *Terminal, owne
 		// N.B. Linux always uses inode id = tty index + 3. See
 		// fs/devpts/inode.c:devpts_pty_new.
 		//
-		// TODO: Since ptsDevice must be shared between
+		// TODO(b/75267214): Since ptsDevice must be shared between
 		// different mounts, we must not assign fixed numbers.
 		InodeID: ptsDevice.NextIno(),
 		Type:    fs.CharacterDevice,
@@ -84,11 +84,13 @@ func (si *slaveInodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags
 //
 // +stateify savable
 type slaveFileOperations struct {
-	fsutil.FilePipeSeek      `state:"nosave"`
-	fsutil.FileNotDirReaddir `state:"nosave"`
-	fsutil.FileNoFsync       `state:"nosave"`
-	fsutil.FileNoopFlush     `state:"nosave"`
-	fsutil.FileNoMMap        `state:"nosave"`
+	fsutil.FilePipeSeek             `state:"nosave"`
+	fsutil.FileNotDirReaddir        `state:"nosave"`
+	fsutil.FileNoFsync              `state:"nosave"`
+	fsutil.FileNoMMap               `state:"nosave"`
+	fsutil.FileNoSplice             `state:"nosave"`
+	fsutil.FileNoopFlush            `state:"nosave"`
+	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
 
 	// si is the inode operations.
 	si *slaveInodeOperations
@@ -136,7 +138,7 @@ func (sf *slaveFileOperations) Ioctl(ctx context.Context, io usermem.IO, args ar
 	case linux.TCSETS:
 		return sf.si.t.ld.setTermios(ctx, io, args)
 	case linux.TCSETSW:
-		// TODO: This should drain the output queue first.
+		// TODO(b/29356795): This should drain the output queue first.
 		return sf.si.t.ld.setTermios(ctx, io, args)
 	case linux.TIOCGPTN:
 		_, err := usermem.CopyObjectOut(ctx, io, args[2].Pointer(), uint32(sf.si.t.n), usermem.IOOpts{
@@ -150,7 +152,7 @@ func (sf *slaveFileOperations) Ioctl(ctx context.Context, io usermem.IO, args ar
 	case linux.TIOCSCTTY:
 		// Make the given terminal the controlling terminal of the
 		// calling process.
-		// TODO: Implement once we have support for job
+		// TODO(b/129283598): Implement once we have support for job
 		// control.
 		return 0, nil
 	default:

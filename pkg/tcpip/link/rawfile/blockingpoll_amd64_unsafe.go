@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,9 +13,10 @@
 // limitations under the License.
 
 // +build linux,amd64
-// +build !go1.13
+// +build go1.12
+// +build !go1.14
 
-// This must be validated with Go 1.13 and future releases.
+// Check go:linkname function signatures when updating Go version.
 
 package rawfile
 

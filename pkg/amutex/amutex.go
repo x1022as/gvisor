@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,9 @@ type Sleeper interface {
 	// SleepFinish is called by AbortableMutex.Lock() once a contended mutex
 	// is acquired or the wait is aborted.
 	SleepFinish(success bool)
+
+	// Interrupted returns true if the wait is aborted.
+	Interrupted() bool
 }
 
 // NoopSleeper is a stateless no-op implementation of Sleeper for anonymous
@@ -46,6 +49,9 @@ func (NoopSleeper) SleepStart() <-chan struct{} {
 
 // SleepFinish implements Sleeper.SleepFinish.
 func (NoopSleeper) SleepFinish(success bool) {}
+
+// Interrupted implements Sleeper.Interrupted.
+func (NoopSleeper) Interrupted() bool { return false }
 
 // AbortableMutex is an abortable mutex. It allows Lock() to be aborted while it
 // waits to acquire the mutex.

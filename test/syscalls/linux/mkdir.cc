@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ class MkdirTest : public ::testing::Test {
 
   // TearDown unlinks created files.
   void TearDown() override {
-    // FIXME: We don't currently implement rmdir.
+    // FIXME(edahlgren): We don't currently implement rmdir.
     // We do this unconditionally because there's no harm in trying.
     rmdir(dirname_.c_str());
   }

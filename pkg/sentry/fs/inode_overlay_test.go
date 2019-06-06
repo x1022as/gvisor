@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -383,13 +383,13 @@ type dir struct {
 }
 
 // Getxattr implements InodeOperations.Getxattr.
-func (d *dir) Getxattr(inode *fs.Inode, name string) ([]byte, error) {
+func (d *dir) Getxattr(inode *fs.Inode, name string) (string, error) {
 	for _, n := range d.negative {
 		if name == fs.XattrOverlayWhiteout(n) {
-			return []byte("y"), nil
+			return "y", nil
 		}
 	}
-	return nil, syserror.ENOATTR
+	return "", syserror.ENOATTR
 }
 
 // GetFile implements InodeOperations.GetFile.
@@ -422,6 +422,7 @@ type inode struct {
 	fsutil.InodeNoExtendedAttributes `state:"nosave"`
 	fsutil.InodeNoopRelease          `state:"nosave"`
 	fsutil.InodeNoopWriteOut         `state:"nosave"`
+	fsutil.InodeNotAllocatable       `state:"nosave"`
 	fsutil.InodeNotDirectory         `state:"nosave"`
 	fsutil.InodeNotMappable          `state:"nosave"`
 	fsutil.InodeNotSocket            `state:"nosave"`

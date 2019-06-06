@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include "absl/time/time.h"
 #include "test/util/file_descriptor.h"
 #include "test/util/test_util.h"
+#include "test/util/time_util.h"
 
 namespace gvisor {
 namespace testing {

@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -87,8 +87,8 @@ func makeTestInjectableEndpoint(t *testing.T) (*InjectableEndpoint, *os.File, tc
 	if err != nil {
 		t.Fatal("Failed to create socket pair:", err)
 	}
-	_, underlyingEndpoint := fdbased.NewInjectable(pair[1], 6500)
+	_, underlyingEndpoint := fdbased.NewInjectable(pair[1], 6500, stack.CapabilityNone)
 	routes := map[tcpip.Address]stack.InjectableLinkEndpoint{dstIP: underlyingEndpoint}
-	_, endpoint := NewInjectableEndpoint(routes, 6500)
+	_, endpoint := NewInjectableEndpoint(routes)
 	return endpoint, os.NewFile(uintptr(pair[0]), "test route end"), dstIP
 }

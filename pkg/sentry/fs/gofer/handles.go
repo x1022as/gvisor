@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ func (h *handles) DecRef() {
 				log.Warningf("error closing host file: %v", err)
 			}
 		}
-		// FIXME: Context is not plumbed here.
+		// FIXME(b/38173783): Context is not plumbed here.
 		if err := h.File.close(context.Background()); err != nil {
 			log.Warningf("error closing p9 file: %v", err)
 		}

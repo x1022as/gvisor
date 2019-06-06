@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ import (
 	"math"
 	"sync"
 
-	"gvisor.googlesource.com/gvisor/pkg/sleep"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/buffer"
 	"gvisor.googlesource.com/gvisor/pkg/tcpip/header"
@@ -50,6 +49,8 @@ const (
 // between users of the endpoint and the protocol implementation; it is legal to
 // have concurrent goroutines make calls into the endpoint, they are properly
 // synchronized.
+//
+// It implements tcpip.Endpoint.
 //
 // +stateify savable
 type endpoint struct {
@@ -344,12 +345,8 @@ func (e *endpoint) Write(p tcpip.Payload, opts tcpip.WriteOptions) (uintptr, <-c
 	}
 
 	if route.IsResolutionRequired() {
-		waker := &sleep.Waker{}
-		if ch, err := route.Resolve(waker); err != nil {
+		if ch, err := route.Resolve(nil); err != nil {
 			if err == tcpip.ErrWouldBlock {
-				// Link address needs to be resolved. Resolution was triggered the background.
-				// Better luck next time.
-				route.RemoveWaker(waker)
 				return 0, ch, tcpip.ErrNoLinkAddress
 			}
 			return 0, nil, err
@@ -458,14 +455,22 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 			return tcpip.ErrUnknownDevice
 		}
 
-		if err := e.stack.JoinGroup(e.netProto, nicID, v.MulticastAddr); err != nil {
-			return err
-		}
+		memToInsert := multicastMembership{nicID: nicID, multicastAddr: v.MulticastAddr}
 
 		e.mu.Lock()
 		defer e.mu.Unlock()
 
-		e.multicastMemberships = append(e.multicastMemberships, multicastMembership{nicID, v.MulticastAddr})
+		for _, mem := range e.multicastMemberships {
+			if mem == memToInsert {
+				return tcpip.ErrPortInUse
+			}
+		}
+
+		if err := e.stack.JoinGroup(e.netProto, nicID, v.MulticastAddr); err != nil {
+			return err
+		}
+
+		e.multicastMemberships = append(e.multicastMemberships, memToInsert)
 
 	case tcpip.RemoveMembershipOption:
 		if !header.IsV4MulticastAddress(v.MulticastAddr) && !header.IsV6MulticastAddress(v.MulticastAddr) {
@@ -488,21 +493,28 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 			return tcpip.ErrUnknownDevice
 		}
 
+		memToRemove := multicastMembership{nicID: nicID, multicastAddr: v.MulticastAddr}
+		memToRemoveIndex := -1
+
+		e.mu.Lock()
+		defer e.mu.Unlock()
+
+		for i, mem := range e.multicastMemberships {
+			if mem == memToRemove {
+				memToRemoveIndex = i
+				break
+			}
+		}
+		if memToRemoveIndex == -1 {
+			return tcpip.ErrBadLocalAddress
+		}
+
 		if err := e.stack.LeaveGroup(e.netProto, nicID, v.MulticastAddr); err != nil {
 			return err
 		}
 
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		for i, mem := range e.multicastMemberships {
-			if mem.nicID == nicID && mem.multicastAddr == v.MulticastAddr {
-				// Only remove the first match, so that each added membership above is
-				// paired with exactly 1 removal.
-				e.multicastMemberships[i] = e.multicastMemberships[len(e.multicastMemberships)-1]
-				e.multicastMemberships = e.multicastMemberships[:len(e.multicastMemberships)-1]
-				break
-			}
-		}
+		e.multicastMemberships[memToRemoveIndex] = e.multicastMemberships[len(e.multicastMemberships)-1]
+		e.multicastMemberships = e.multicastMemberships[:len(e.multicastMemberships)-1]
 
 	case tcpip.MulticastLoopOption:
 		e.mu.Lock()
@@ -640,7 +652,7 @@ func sendUDP(r *stack.Route, data buffer.VectorisedView, localPort, remotePort u
 	})
 
 	// Only calculate the checksum if offloading isn't supported.
-	if r.Capabilities()&stack.CapabilityChecksumOffload == 0 {
+	if r.Capabilities()&stack.CapabilityTXChecksumOffload == 0 {
 		xsum := r.PseudoHeaderChecksum(ProtocolNumber, length)
 		for _, v := range data.Views() {
 			xsum = header.Checksum(v, xsum)

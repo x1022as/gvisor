@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ func (*endpoint) MTU() uint32 {
 // Capabilities implements stack.LinkEndpoint.Capabilities. Loopback advertises
 // itself as supporting checksum offload, but in reality it's just omitted.
 func (*endpoint) Capabilities() stack.LinkEndpointCapabilities {
-	return stack.CapabilityChecksumOffload | stack.CapabilitySaveRestore | stack.CapabilityLoopback
+	return stack.CapabilityRXChecksumOffload | stack.CapabilityTXChecksumOffload | stack.CapabilitySaveRestore | stack.CapabilityLoopback
 }
 
 // MaxHeaderLength implements stack.LinkEndpoint.MaxHeaderLength. Given that the

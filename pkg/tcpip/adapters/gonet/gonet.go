@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package gonet
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -435,6 +436,28 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// CloseRead shuts down the reading side of the TCP connection. Most callers
+// should just use Close.
+//
+// A TCP Half-Close is performed the same as CloseRead for *net.TCPConn.
+func (c *Conn) CloseRead() error {
+	if terr := c.ep.Shutdown(tcpip.ShutdownRead); terr != nil {
+		return c.newOpError("close", errors.New(terr.String()))
+	}
+	return nil
+}
+
+// CloseWrite shuts down the writing side of the TCP connection. Most callers
+// should just use Close.
+//
+// A TCP Half-Close is performed the same as CloseWrite for *net.TCPConn.
+func (c *Conn) CloseWrite() error {
+	if terr := c.ep.Shutdown(tcpip.ShutdownWrite); terr != nil {
+		return c.newOpError("close", errors.New(terr.String()))
+	}
+	return nil
+}
+
 // LocalAddr implements net.Conn.LocalAddr.
 func (c *Conn) LocalAddr() net.Addr {
 	a, err := c.ep.GetLocalAddress()
@@ -473,6 +496,12 @@ func fullToUDPAddr(addr tcpip.FullAddress) *net.UDPAddr {
 
 // DialTCP creates a new TCP Conn connected to the specified address.
 func DialTCP(s *stack.Stack, addr tcpip.FullAddress, network tcpip.NetworkProtocolNumber) (*Conn, error) {
+	return DialContextTCP(context.Background(), s, addr, network)
+}
+
+// DialContextTCP creates a new TCP Conn connected to the specified address
+// with the option of adding cancellation and timeouts.
+func DialContextTCP(ctx context.Context, s *stack.Stack, addr tcpip.FullAddress, network tcpip.NetworkProtocolNumber) (*Conn, error) {
 	// Create TCP endpoint, then connect.
 	var wq waiter.Queue
 	ep, err := s.NewEndpoint(tcp.ProtocolNumber, network, &wq)
@@ -487,9 +516,21 @@ func DialTCP(s *stack.Stack, addr tcpip.FullAddress, network tcpip.NetworkProtoc
 	wq.EventRegister(&waitEntry, waiter.EventOut)
 	defer wq.EventUnregister(&waitEntry)
 
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	err = ep.Connect(addr)
 	if err == tcpip.ErrConnectStarted {
-		<-notifyCh
+		select {
+		case <-ctx.Done():
+			ep.Close()
+			return nil, ctx.Err()
+		case <-notifyCh:
+		}
+
 		err = ep.GetSockOpt(tcpip.ErrorOption{})
 	}
 	if err != nil {

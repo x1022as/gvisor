@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -186,7 +186,6 @@
 #include <vector>
 
 #include <gflags/gflags.h>
-#include <glog/logging.h>
 #include "gmock/gmock.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -210,12 +209,9 @@ void TestInit(int* argc, char*** argv);
 // SKIP_IF may be used to skip a test case.
 //
 // These cases are still emitted, but a SKIPPED line will appear.
-#define SKIP_IF(expr)                                                        \
-  do {                                                                       \
-    if (expr) {                                                              \
-      std::cout << "\033[0;33m[  SKIPPED ]\033[m => " << #expr << std::endl; \
-      return;                                                                \
-    }                                                                        \
+#define SKIP_IF(expr)                \
+  do {                               \
+    if (expr) GTEST_SKIP() << #expr; \
   } while (0)
 
 enum class Platform {
@@ -269,16 +265,6 @@ PosixErrorOr<std::vector<OpenFd>> GetOpenFDs();
 PosixErrorOr<uint64_t> Links(const std::string& path);
 
 namespace internal {
-
-inline std::string ErrnoWithMessage(int const errnum) {
-  char buf[1024] = {};
-  const char* str = strerror_r(errnum, buf, sizeof(buf));
-  if (str == nullptr || str[0] == '\0') {
-    snprintf(buf, sizeof(buf), "Unknown error %d", errnum);
-    str = buf;
-  }
-  return absl::StrCat(errnum, " (", str, ")");
-}
 
 template <typename Container>
 class ElementOfMatcher {
@@ -348,7 +334,7 @@ class SyscallSuccessMatcher {
         T const& rv,
         ::testing::MatchResultListener* const listener) const override {
       if (rv == static_cast<decltype(rv)>(-1) && errno != 0) {
-        *listener << "with errno " << ErrnoWithMessage(errno);
+        *listener << "with errno " << PosixError(errno);
         return false;
       }
       bool match = matcher_.MatchAndExplain(rv, listener);
@@ -416,7 +402,7 @@ class SyscallFailureMatcher {
       return false;
     }
     int actual_errno = errno;
-    *listener << "with errno " << ErrnoWithMessage(actual_errno);
+    *listener << "with errno " << PosixError(actual_errno);
     bool match = errno_matcher_.MatchAndExplain(actual_errno, listener);
     if (match) {
       MaybeSave();
@@ -449,11 +435,11 @@ class SpecificErrnoMatcher : public ::testing::MatcherInterface<int> {
   }
 
   void DescribeTo(::std::ostream* const os) const override {
-    *os << ErrnoWithMessage(expected_);
+    *os << PosixError(expected_);
   }
 
   void DescribeNegationTo(::std::ostream* const os) const override {
-    *os << "not " << ErrnoWithMessage(expected_);
+    *os << "not " << PosixError(expected_);
   }
 
  private:
@@ -751,9 +737,6 @@ inline PosixErrorOr<float> Atof(absl::string_view str) {
 // "total_bytes" number of bytes, each iovec writing one "buf".
 std::vector<std::vector<struct iovec>> GenerateIovecs(uint64_t total_size,
                                                       void* buf, size_t buflen);
-
-// Sleep for at least the specified duration. Avoids glibc.
-void SleepSafe(absl::Duration duration);
 
 // Returns bytes in 'n' megabytes. Used for readability.
 uint64_t Megabytes(uint64_t n);

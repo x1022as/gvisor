@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -353,7 +353,7 @@ PosixErrorOr<std::unique_ptr<AddrFDSocketPair>> CreateTCPAcceptBindSocketPair(
   }
   MaybeSave();  // Successful accept.
 
-  // FIXME
+  // FIXME(b/110484944)
   if (connect_result == -1) {
     absl::SleepFor(absl::Seconds(1));
   }

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ type CPUSet []byte
 
 // CPUSetSize returns the size in bytes of a CPUSet that can contain num cpus.
 func CPUSetSize(num uint) uint {
-	// NOTE: Applications may expect that the size of a CPUSet in
+	// NOTE(b/68859821): Applications may expect that the size of a CPUSet in
 	// bytes is always a multiple of sizeof(unsigned long), since this is true
 	// in Linux. Thus we always round up.
 	bytes := (num + bitsPerByte - 1) / bitsPerByte

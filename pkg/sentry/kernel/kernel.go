@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -175,9 +175,9 @@ type Kernel struct {
 	// netlinkPorts manages allocation of netlink socket port IDs.
 	netlinkPorts *port.Manager
 
-	// exitErr is the error causing the sandbox to exit, if any. It is
-	// protected by extMu.
-	exitErr error `state:"nosave"`
+	// saveErr is the error causing the sandbox to exit during save, if
+	// any. It is protected by extMu.
+	saveErr error `state:"nosave"`
 
 	// danglingEndpoints is used to save / restore tcpip.DanglingEndpoints.
 	danglingEndpoints struct{} `state:".([]tcpip.Endpoint)"`
@@ -188,6 +188,11 @@ type Kernel struct {
 
 	// deviceRegistry is used to save/restore device.SimpleDevices.
 	deviceRegistry struct{} `state:".(*device.Registry)"`
+
+	// DirentCacheLimiter controls the number of total dirent entries can be in
+	// caches. Not all caches use it, only the caches that use host resources use
+	// the limiter. It may be nil if disabled.
+	DirentCacheLimiter *fs.DirentCacheLimiter
 }
 
 // InitKernelArgs holds arguments to Init.
@@ -298,7 +303,13 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 	k.pauseTimeLocked()
 	defer k.resumeTimeLocked()
 
+	// Evict all evictable MemoryFile allocations.
+	k.mf.StartEvictions()
+	k.mf.WaitForEvictions()
+
 	// Flush write operations on open files so data reaches backing storage.
+	// This must come after MemoryFile eviction since eviction may cause file
+	// writes.
 	if err := k.tasks.flushWritesToFiles(ctx); err != nil {
 		return err
 	}
@@ -311,7 +322,9 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 	// Clear the dirent cache before saving because Dirents must be Loaded in a
 	// particular order (parents before children), and Loading dirents from a cache
 	// breaks that order.
-	k.mounts.FlushMountSourceRefs()
+	if err := k.flushMountSourceRefs(); err != nil {
+		return err
+	}
 
 	// Ensure that all pending asynchronous work is complete:
 	//   - inode and mount release
@@ -329,6 +342,17 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 	if err := k.invalidateUnsavableMappings(ctx); err != nil {
 		return fmt.Errorf("failed to invalidate unsavable mappings: %v", err)
 	}
+
+	// Save the CPUID FeatureSet before the rest of the kernel so we can
+	// verify its compatibility on restore before attempting to restore the
+	// entire kernel, which may fail on an incompatible machine.
+	//
+	// N.B. This will also be saved along with the full kernel save below.
+	cpuidStart := time.Now()
+	if err := state.Save(w, k.FeatureSet(), nil); err != nil {
+		return err
+	}
+	log.Infof("CPUID save took [%s].", time.Since(cpuidStart))
 
 	// Save the kernel state.
 	kernelStart := time.Now()
@@ -351,37 +375,65 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 	return nil
 }
 
-func (ts *TaskSet) flushWritesToFiles(ctx context.Context) error {
+// flushMountSourceRefs flushes the MountSources for all mounted filesystems
+// and open FDs.
+func (k *Kernel) flushMountSourceRefs() error {
+	// Flush all mount sources for currently mounted filesystems.
+	k.mounts.FlushMountSourceRefs()
+
+	// There may be some open FDs whose filesystems have been unmounted. We
+	// must flush those as well.
+	return k.tasks.forEachFDPaused(func(desc descriptor) error {
+		desc.file.Dirent.Inode.MountSource.FlushDirentRefs()
+		return nil
+	})
+}
+
+// forEachFDPaused applies the given function to each open file descriptor in each
+// task.
+//
+// Precondition: Must be called with the kernel paused.
+func (ts *TaskSet) forEachFDPaused(f func(descriptor) error) error {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	for t := range ts.Root.tids {
 		// We can skip locking Task.mu here since the kernel is paused.
-		if fdmap := t.fds; fdmap != nil {
-			for _, desc := range fdmap.files {
-				if flags := desc.file.Flags(); !flags.Write {
-					continue
-				}
-				if sattr := desc.file.Dirent.Inode.StableAttr; !fs.IsFile(sattr) && !fs.IsDir(sattr) {
-					continue
-				}
-				// Here we need all metadata synced.
-				syncErr := desc.file.Fsync(ctx, 0, fs.FileMaxOffset, fs.SyncAll)
-				if err := fs.SaveFileFsyncError(syncErr); err != nil {
-					name, _ := desc.file.Dirent.FullName(nil /* root */)
-					// Wrap this error in ErrSaveRejection
-					// so that it will trigger a save
-					// error, rather than a panic. This
-					// also allows us to distinguish Fsync
-					// errors from state file errors in
-					// state.Save.
-					return fs.ErrSaveRejection{
-						Err: fmt.Errorf("%q was not sufficiently synced: %v", name, err),
-					}
-				}
+		if t.fds == nil {
+			continue
+		}
+		for _, desc := range t.fds.files {
+			if err := f(desc); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+func (ts *TaskSet) flushWritesToFiles(ctx context.Context) error {
+	return ts.forEachFDPaused(func(desc descriptor) error {
+		if flags := desc.file.Flags(); !flags.Write {
+			return nil
+		}
+		if sattr := desc.file.Dirent.Inode.StableAttr; !fs.IsFile(sattr) && !fs.IsDir(sattr) {
+			return nil
+		}
+		// Here we need all metadata synced.
+		syncErr := desc.file.Fsync(ctx, 0, fs.FileMaxOffset, fs.SyncAll)
+		if err := fs.SaveFileFsyncError(syncErr); err != nil {
+			name, _ := desc.file.Dirent.FullName(nil /* root */)
+			// Wrap this error in ErrSaveRejection
+			// so that it will trigger a save
+			// error, rather than a panic. This
+			// also allows us to distinguish Fsync
+			// errors from state file errors in
+			// state.Save.
+			return fs.ErrSaveRejection{
+				Err: fmt.Errorf("%q was not sufficiently synced: %v", name, err),
+			}
+		}
+		return nil
+	})
 }
 
 // Preconditions: The kernel must be paused.
@@ -433,6 +485,25 @@ func (k *Kernel) LoadFrom(r io.Reader, net inet.Stack) error {
 	k.networkStack = net
 
 	initAppCores := k.applicationCores
+
+	// Load the pre-saved CPUID FeatureSet.
+	//
+	// N.B. This was also saved along with the full kernel below, so we
+	// don't need to explicitly install it in the Kernel.
+	cpuidStart := time.Now()
+	var features cpuid.FeatureSet
+	if err := state.Load(r, &features, nil); err != nil {
+		return err
+	}
+	log.Infof("CPUID load took [%s].", time.Since(cpuidStart))
+
+	// Verify that the FeatureSet is usable on this host. We do this before
+	// Kernel load so that the explicit CPUID mismatch error has priority
+	// over floating point state restore errors that may occur on load on
+	// an incompatible machine.
+	if err := features.CheckHostCompatible(); err != nil {
+		return err
+	}
 
 	// Load the kernel state.
 	kernelStart := time.Now()
@@ -596,6 +667,8 @@ func (ctx *createProcessContext) Value(key interface{}) interface{} {
 			return ctx.k.mounts.Root()
 		}
 		return nil
+	case fs.CtxDirentCacheLimiter:
+		return ctx.k.DirentCacheLimiter
 	case ktime.CtxRealtimeClock:
 		return ctx.k.RealtimeClock()
 	case limits.CtxLimits:
@@ -646,6 +719,10 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 	root := args.Root
 	if root == nil {
 		root = fs.RootFromContext(ctx)
+		// Is the root STILL nil?
+		if root == nil {
+			return nil, 0, fmt.Errorf("CreateProcessArgs.Root was not provided, and failed to get root from context")
+		}
 	}
 	defer root.DecRef()
 	args.Root = nil
@@ -988,20 +1065,21 @@ func (k *Kernel) NetlinkPorts() *port.Manager {
 	return k.netlinkPorts
 }
 
-// ExitError returns the sandbox error that caused the kernel to exit.
-func (k *Kernel) ExitError() error {
+// SaveError returns the sandbox error that caused the kernel to exit during
+// save.
+func (k *Kernel) SaveError() error {
 	k.extMu.Lock()
 	defer k.extMu.Unlock()
-	return k.exitErr
+	return k.saveErr
 }
 
-// SetExitError sets the sandbox error that caused the kernel to exit, if one is
-// not already set.
-func (k *Kernel) SetExitError(err error) {
+// SetSaveError sets the sandbox error that caused the kernel to exit during
+// save, if one is not already set.
+func (k *Kernel) SetSaveError(err error) {
 	k.extMu.Lock()
 	defer k.extMu.Unlock()
-	if k.exitErr == nil {
-		k.exitErr = err
+	if k.saveErr == nil {
+		k.saveErr = err
 	}
 }
 
@@ -1136,6 +1214,8 @@ func (ctx supervisorContext) Value(key interface{}) interface{} {
 		return auth.NewRootCredentials(ctx.k.rootUserNamespace)
 	case fs.CtxRoot:
 		return ctx.k.mounts.Root()
+	case fs.CtxDirentCacheLimiter:
+		return ctx.k.DirentCacheLimiter
 	case ktime.CtxRealtimeClock:
 		return ctx.k.RealtimeClock()
 	case limits.CtxLimits:

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -102,6 +102,18 @@ type TCPFastRecoveryState struct {
 	// MaxCwnd is the maximum value we are permitted to grow the congestion
 	// window during recovery. This is set at the time we enter recovery.
 	MaxCwnd int
+
+	// HighRxt is the highest sequence number which has been retransmitted
+	// during the current loss recovery phase.
+	// See: RFC 6675 Section 2 for details.
+	HighRxt seqnum.Value
+
+	// RescueRxt is the highest sequence number which has been
+	// optimistically retransmitted to prevent stalling of the ACK clock
+	// when there is loss at the end of the window and no new data is
+	// available for transmission.
+	// See: RFC 6675 Section 2 for details.
+	RescueRxt seqnum.Value
 }
 
 // TCPReceiverState holds a copy of the internal state of the receiver for
@@ -291,6 +303,10 @@ type Stack struct {
 
 	linkAddrCache *linkAddrCache
 
+	// raw indicates whether raw sockets may be created. It is set during
+	// Stack creation and is immutable.
+	raw bool
+
 	mu         sync.RWMutex
 	nics       map[tcpip.NICID]*NIC
 	forwarding bool
@@ -327,6 +343,9 @@ type Options struct {
 	// should be handled by the stack internally (true) or outside the
 	// stack (false).
 	HandleLocal bool
+
+	// Raw indicates whether raw sockets may be created.
+	Raw bool
 }
 
 // New allocates a new networking stack with only the requested networking and
@@ -352,6 +371,7 @@ func New(network []string, transport []string, opts Options) *Stack {
 		clock:              clock,
 		stats:              opts.Stats.FillIn(),
 		handleLocal:        opts.HandleLocal,
+		raw:                opts.Raw,
 	}
 
 	// Add specified network protocols.
@@ -468,7 +488,7 @@ func (s *Stack) Stats() tcpip.Stats {
 
 // SetForwarding enables or disables the packet forwarding between NICs.
 func (s *Stack) SetForwarding(enable bool) {
-	// TODO: Expose via /proc/sys/net/ipv4/ip_forward.
+	// TODO(igudger, bgeffon): Expose via /proc/sys/net/ipv4/ip_forward.
 	s.mu.Lock()
 	s.forwarding = enable
 	s.mu.Unlock()
@@ -476,7 +496,7 @@ func (s *Stack) SetForwarding(enable bool) {
 
 // Forwarding returns if the packet forwarding between NICs is enabled.
 func (s *Stack) Forwarding() bool {
-	// TODO: Expose via /proc/sys/net/ipv4/ip_forward.
+	// TODO(igudger, bgeffon): Expose via /proc/sys/net/ipv4/ip_forward.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.forwarding
@@ -512,6 +532,10 @@ func (s *Stack) NewEndpoint(transport tcpip.TransportProtocolNumber, network tcp
 // protocol. Raw endpoints receive all traffic for a given protocol regardless
 // of address.
 func (s *Stack) NewRawEndpoint(transport tcpip.TransportProtocolNumber, network tcpip.NetworkProtocolNumber, waiterQueue *waiter.Queue) (tcpip.Endpoint, *tcpip.Error) {
+	if !s.raw {
+		return nil, tcpip.ErrNotPermitted
+	}
+
 	t, ok := s.transportProtocols[transport]
 	if !ok {
 		return nil, tcpip.ErrUnknownProtocol
@@ -1012,7 +1036,7 @@ func (s *Stack) TransportProtocolInstance(num tcpip.TransportProtocolNumber) Tra
 
 // AddTCPProbe installs a probe function that will be invoked on every segment
 // received by a given TCP endpoint. The probe function is passed a copy of the
-// TCP endpoint state.
+// TCP endpoint state before and after processing of the segment.
 //
 // NOTE: TCPProbe is added only to endpoints created after this call. Endpoints
 // created prior to this call will not call the probe function.
@@ -1050,10 +1074,22 @@ func (s *Stack) RemoveTCPProbe() {
 // JoinGroup joins the given multicast group on the given NIC.
 func (s *Stack) JoinGroup(protocol tcpip.NetworkProtocolNumber, nicID tcpip.NICID, multicastAddr tcpip.Address) *tcpip.Error {
 	// TODO: notify network of subscription via igmp protocol.
-	return s.AddAddressWithOptions(nicID, protocol, multicastAddr, NeverPrimaryEndpoint)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if nic, ok := s.nics[nicID]; ok {
+		return nic.joinGroup(protocol, multicastAddr)
+	}
+	return tcpip.ErrUnknownNICID
 }
 
 // LeaveGroup leaves the given multicast group on the given NIC.
 func (s *Stack) LeaveGroup(protocol tcpip.NetworkProtocolNumber, nicID tcpip.NICID, multicastAddr tcpip.Address) *tcpip.Error {
-	return s.RemoveAddress(nicID, multicastAddr)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if nic, ok := s.nics[nicID]; ok {
+		return nic.leaveGroup(multicastAddr)
+	}
+	return tcpip.ErrUnknownNICID
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -136,14 +136,15 @@ func (cp cachePolicy) revalidate(ctx context.Context, name string, parent, child
 
 	// Walk from parent to child again.
 	//
-	// TODO: If we have a directory FD in the parent
+	// TODO(b/112031682): If we have a directory FD in the parent
 	// inodeOperations, then we can use fstatat(2) to get the inode
 	// attributes instead of making this RPC.
-	qids, _, mask, attr, err := parentIops.fileState.file.walkGetAttr(ctx, []string{name})
+	qids, f, mask, attr, err := parentIops.fileState.file.walkGetAttr(ctx, []string{name})
 	if err != nil {
 		// Can't look up the name. Trigger reload.
 		return true
 	}
+	f.close(ctx)
 
 	// If the Path has changed, then we are not looking at the file file.
 	// We must reload.
@@ -171,7 +172,7 @@ func (cp cachePolicy) keep(d *fs.Dirent) bool {
 		return false
 	}
 	sattr := d.Inode.StableAttr
-	// NOTE: Only cache files, directories, and symlinks.
+	// NOTE(b/31979197): Only cache files, directories, and symlinks.
 	return fs.IsFile(sattr) || fs.IsDir(sattr) || fs.IsSymlink(sattr)
 }
 

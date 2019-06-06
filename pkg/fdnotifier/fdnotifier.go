@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// +build linux
 
 // Package fdnotifier contains an adapter that translates IO events (e.g., a
 // file became readable/writable) from native FDs to the notifications in the
@@ -70,7 +72,7 @@ func (n *notifier) waitFD(fd int32, fi *fdInfo, mask waiter.EventMask) error {
 	}
 
 	e := syscall.EpollEvent{
-		Events: uint32(mask) | -syscall.EPOLLET,
+		Events: mask.ToLinux() | -syscall.EPOLLET,
 		Fd:     fd,
 	}
 
@@ -155,7 +157,7 @@ func (n *notifier) waitAndNotify() error {
 		n.mu.Lock()
 		for i := 0; i < v; i++ {
 			if fi, ok := n.fdMap[e[i].Fd]; ok {
-				fi.queue.Notify(waiter.EventMask(e[i].Events))
+				fi.queue.Notify(waiter.EventMaskFromLinux(e[i].Events))
 			}
 		}
 		n.mu.Unlock()

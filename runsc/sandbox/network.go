@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -246,6 +246,7 @@ func createInterfacesAndRoutesFromNS(conn *urpc.Client, nsPath string, enableGSO
 		if err != nil {
 			return fmt.Errorf("getting link for interface %q: %v", iface.Name, err)
 		}
+		link.LinkAddress = []byte(ifaceLink.Attrs().HardwareAddr)
 
 		if enableGSO {
 			gso, err := isGSOEnabled(fd, iface.Name)
@@ -257,7 +258,20 @@ func createInterfacesAndRoutesFromNS(conn *urpc.Client, nsPath string, enableGSO
 					return fmt.Errorf("unable to enable the PACKET_VNET_HDR option: %v", err)
 				}
 				link.GSOMaxSize = ifaceLink.Attrs().GSOMaxSize
+			} else {
+				log.Infof("GSO not available in host.")
 			}
+		}
+
+		// Use SO_RCVBUFFORCE because on linux the receive buffer for an
+		// AF_PACKET socket is capped by "net.core.rmem_max". rmem_max
+		// defaults to a unusually low value of 208KB. This is too low
+		// for gVisor to be able to receive packets at high throughputs
+		// without incurring packet drops.
+		const rcvBufSize = 4 << 20 // 4MB.
+
+		if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, rcvBufSize); err != nil {
+			return fmt.Errorf("failed to increase socket rcv buffer to %d: %v", rcvBufSize, err)
 		}
 
 		// Collect the addresses for the interface, enable forwarding,

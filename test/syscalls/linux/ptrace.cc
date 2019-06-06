@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <iostream>
 #include <utility>
 
 #include "gmock/gmock.h"
@@ -33,6 +34,7 @@
 #include "test/util/signal_util.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
+#include "test/util/time_util.h"
 
 DEFINE_bool(ptrace_test_execve_child, false,
             "If true, run the "
@@ -624,7 +626,7 @@ TEST_P(PtraceExecveTest, Execve_GetRegs_PeekUser_SIGKILL_TraceClone_TraceExit) {
   _exit(1);
 }
 
-INSTANTIATE_TEST_CASE_P(TraceExec, PtraceExecveTest, ::testing::Bool());
+INSTANTIATE_TEST_SUITE_P(TraceExec, PtraceExecveTest, ::testing::Bool());
 
 // This test has expectations on when syscall-enter/exit-stops occur that are
 // violated if saving occurs, since saving interrupts all syscalls, causing
@@ -822,7 +824,7 @@ TEST(PtraceTest,
 TEST(PtraceTest, Int3) {
   switch (GvisorPlatform()) {
     case Platform::kKVM:
-      // TODO: int3 isn't handled properly.
+      // TODO(b/124248694): int3 isn't handled properly.
       return;
     default:
       break;
@@ -1152,10 +1154,46 @@ TEST(PtraceTest, SeizeSetOptions) {
   EXPECT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80))
       << " status " << status;
 
-  // SIGKILL the child (detaching the tracer) and wait for it to exit.
+  // Clean up the child.
   ASSERT_THAT(kill(child_pid, SIGKILL), SyscallSucceeds());
   ASSERT_THAT(waitpid(child_pid, &status, 0),
               SyscallSucceedsWithValue(child_pid));
+  if (WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80)) {
+    // "SIGKILL kills even within system calls (syscall-exit-stop is not
+    // generated prior to death by SIGKILL). The net effect is that SIGKILL
+    // always kills the process (all its threads), even if some threads of the
+    // process are ptraced." - ptrace(2). This is technically true, but...
+    //
+    // When we send SIGKILL to the child, kernel/signal.c:complete_signal() =>
+    // signal_wake_up(resume=1) kicks the tracee out of the syscall-enter-stop.
+    // The pending SIGKILL causes the syscall to be skipped, but the child
+    // thread still reports syscall-exit before checking for pending signals; in
+    // current kernels, this is
+    // arch/x86/entry/common.c:syscall_return_slowpath() =>
+    // syscall_slow_exit_work() =>
+    // include/linux/tracehook.h:tracehook_report_syscall_exit() =>
+    // ptrace_report_syscall() => kernel/signal.c:ptrace_notify() =>
+    // ptrace_do_notify() => ptrace_stop().
+    //
+    // ptrace_stop() sets the task's state to TASK_TRACED and the task's
+    // exit_code to SIGTRAP|0x80 (passed by ptrace_report_syscall()), then calls
+    // freezable_schedule(). freezable_schedule() eventually reaches
+    // __schedule(), which detects signal_pending_state() due to the pending
+    // SIGKILL, sets the task's state back to TASK_RUNNING, and returns without
+    // descheduling. Thus, the task never enters syscall-exit-stop. However, if
+    // our wait4() => kernel/exit.c:wait_task_stopped() racily observes the
+    // TASK_TRACED state and the non-zero exit code set by ptrace_stop() before
+    // __schedule() sets the state back to TASK_RUNNING, it will return the
+    // task's exit_code as status W_STOPCODE(SIGTRAP|0x80). So we get a spurious
+    // syscall-exit-stop notification, and need to wait4() again for task exit.
+    //
+    // gVisor is not susceptible to this race because
+    // kernel.Task.waitCollectTraceeStopLocked() checks specifically for an
+    // active ptraceStop, which is not initiated if SIGKILL is pending.
+    std::cout << "Observed syscall-exit after SIGKILL";
+    ASSERT_THAT(waitpid(child_pid, &status, 0),
+                SyscallSucceedsWithValue(child_pid));
+  }
   EXPECT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL)
       << " status " << status;
 }

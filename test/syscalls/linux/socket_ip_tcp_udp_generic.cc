@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,9 +14,9 @@
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -68,8 +68,8 @@ std::vector<SocketPairKind> GetSocketPairs() {
           AllBitwiseCombinations(List<int>{0, SOCK_NONBLOCK})));
 }
 
-INSTANTIATE_TEST_CASE_P(
-    AllTCPSockets, TcpUdpSocketPairTest,
+INSTANTIATE_TEST_SUITE_P(
+    AllIPSockets, TcpUdpSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(GetSocketPairs())));
 
 }  // namespace

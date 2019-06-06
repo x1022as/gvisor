@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -125,7 +125,7 @@ func NewUserCredentials(kuid KUID, kgid KGID, extraKGIDs []KGID, capabilities *T
 		creds.EffectiveCaps = capabilities.EffectiveCaps
 		creds.BoundingCaps = capabilities.BoundingCaps
 		creds.InheritableCaps = capabilities.InheritableCaps
-		// TODO: Support ambient capabilities.
+		// TODO(nlacasse): Support ambient capabilities.
 	} else {
 		// If no capabilities are specified, grant capabilities consistent with
 		// setresuid + setresgid from NewRootCredentials to the given uid and

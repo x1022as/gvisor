@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@ func TestLifeCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal("docker.FindPort(80) failed: ", err)
 	}
-	if err := testutil.WaitForHTTP(port, 5*time.Second); err != nil {
+	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
 		t.Fatal("WaitForHTTP() timeout:", err)
 	}
 	client := http.Client{Timeout: time.Duration(2 * time.Second)}
@@ -138,11 +138,55 @@ func TestPauseResume(t *testing.T) {
 	}
 
 	// Wait until it's up and running.
-	if err := testutil.WaitForHTTP(port, 20*time.Second); err != nil {
+	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
 		t.Fatal("WaitForHTTP() timeout:", err)
 	}
 
 	// Check if container is working again.
+	if err := httpRequestSucceeds(client, "localhost", port); err != nil {
+		t.Error("http request failed:", err)
+	}
+}
+
+func TestCheckpointRestore(t *testing.T) {
+	if !testutil.IsPauseResumeSupported() {
+		t.Log("Pause/resume is not supported, skipping test.")
+		return
+	}
+	if err := testutil.Pull("google/python-hello"); err != nil {
+		t.Fatal("docker pull failed:", err)
+	}
+	d := testutil.MakeDocker("save-restore-test")
+	if err := d.Run("-p", "8080", "google/python-hello"); err != nil {
+		t.Fatalf("docker run failed: %v", err)
+	}
+	defer d.CleanUp()
+
+	if err := d.Checkpoint("test"); err != nil {
+		t.Fatal("docker checkpoint failed:", err)
+	}
+
+	if _, err := d.Wait(30 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.Restore("test"); err != nil {
+		t.Fatal("docker restore failed:", err)
+	}
+
+	// Find where port 8080 is mapped to.
+	port, err := d.FindPort(8080)
+	if err != nil {
+		t.Fatal("docker.FindPort(8080) failed:", err)
+	}
+
+	// Wait until it's up and running.
+	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
+		t.Fatal("WaitForHTTP() timeout:", err)
+	}
+
+	// Check if container is working again.
+	client := http.Client{Timeout: time.Duration(2 * time.Second)}
 	if err := httpRequestSucceeds(client, "localhost", port); err != nil {
 		t.Error("http request failed:", err)
 	}

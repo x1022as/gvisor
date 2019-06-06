@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package kernel
 import (
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/mm"
 	"gvisor.googlesource.com/gvisor/pkg/syserror"
 )
 
@@ -206,8 +207,17 @@ func (t *Task) setKUIDsUncheckedLocked(newR, newE, newS auth.KUID) {
 	// (filesystem UIDs aren't implemented, nor are any of the capabilities in
 	// question)
 
-	// Not documented, but compare Linux's kernel/cred.c:commit_creds().
 	if oldE != newE {
+		// "[dumpability] is reset to the current value contained in
+		// the file /proc/sys/fs/suid_dumpable (which by default has
+		// the value 0), in the following circumstances: The process's
+		// effective user or group ID is changed." - prctl(2)
+		//
+		// (suid_dumpable isn't implemented, so we just use the
+		// default.
+		t.MemoryManager().SetDumpability(mm.NotDumpable)
+
+		// Not documented, but compare Linux's kernel/cred.c:commit_creds().
 		t.parentDeathSignal = 0
 	}
 }
@@ -303,8 +313,18 @@ func (t *Task) setKGIDsUncheckedLocked(newR, newE, newS auth.KGID) {
 	t.creds = t.creds.Fork() // See doc for creds.
 	t.creds.RealKGID, t.creds.EffectiveKGID, t.creds.SavedKGID = newR, newE, newS
 
-	// Not documented, but compare Linux's kernel/cred.c:commit_creds().
 	if oldE != newE {
+		// "[dumpability] is reset to the current value contained in
+		// the file /proc/sys/fs/suid_dumpable (which by default has
+		// the value 0), in the following circumstances: The process's
+		// effective user or group ID is changed." - prctl(2)
+		//
+		// (suid_dumpable isn't implemented, so we just use the
+		// default.
+		t.MemoryManager().SetDumpability(mm.NotDumpable)
+
+		// Not documented, but compare Linux's
+		// kernel/cred.c:commit_creds().
 		t.parentDeathSignal = 0
 	}
 }
@@ -421,7 +441,7 @@ func (t *Task) SetKeepCaps(k bool) {
 
 // updateCredsForExec updates t.creds to reflect an execve().
 //
-// NOTE: We currently do not implement privileged executables
+// NOTE(b/30815691): We currently do not implement privileged executables
 // (set-user/group-ID bits and file capabilities). This allows us to make a lot
 // of simplifying assumptions:
 //

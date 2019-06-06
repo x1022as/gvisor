@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -137,7 +137,7 @@ func (mm *MemoryManager) MMap(ctx context.Context, opts memmap.MMapOpts) (userme
 		return 0, err
 	}
 
-	// TODO: In Linux, VM_LOCKONFAULT (which may be set on the new
+	// TODO(jamieliu): In Linux, VM_LOCKONFAULT (which may be set on the new
 	// vma by mlockall(MCL_FUTURE|MCL_ONFAULT) => mm_struct::def_flags) appears
 	// to effectively disable MAP_POPULATE by unsetting FOLL_POPULATE in
 	// mm/util.c:vm_mmap_pgoff() => mm/gup.c:__mm_populate() =>
@@ -148,7 +148,7 @@ func (mm *MemoryManager) MMap(ctx context.Context, opts memmap.MMapOpts) (userme
 		mm.populateVMAAndUnlock(ctx, vseg, ar, true)
 
 	case opts.Mappable == nil && length <= privateAllocUnit:
-		// NOTE: Get pmas and map eagerly in the hope
+		// NOTE(b/63077076, b/63360184): Get pmas and map eagerly in the hope
 		// that doing so will save on future page faults. We only do this for
 		// anonymous mappings, since otherwise the cost of
 		// memmap.Mappable.Translate is unknown; and only for small mappings,
@@ -470,6 +470,16 @@ func (mm *MemoryManager) MRemap(ctx context.Context, oldAddr usermem.Addr, oldSi
 			return 0, syserror.EINVAL
 		}
 
+		// Check that the new region is valid.
+		_, err := mm.findAvailableLocked(newSize, findAvailableOpts{
+			Addr:  newAddr,
+			Fixed: true,
+			Unmap: true,
+		})
+		if err != nil {
+			return 0, err
+		}
+
 		// Unmap any mappings at the destination.
 		mm.unmapLocked(ctx, newAR)
 
@@ -527,6 +537,9 @@ func (mm *MemoryManager) MRemap(ctx context.Context, oldAddr usermem.Addr, oldSi
 		}
 		vseg := mm.vmas.Insert(mm.vmas.FindGap(newAR.Start), newAR, vma)
 		mm.usageAS += uint64(newAR.Length())
+		if vma.isPrivateDataLocked() {
+			mm.dataAS += uint64(newAR.Length())
+		}
 		if vma.mlockMode != memmap.MLockNone {
 			mm.lockedAS += uint64(newAR.Length())
 			if vma.mlockMode == memmap.MLockEager {
@@ -556,6 +569,9 @@ func (mm *MemoryManager) MRemap(ctx context.Context, oldAddr usermem.Addr, oldSi
 	mm.vmas.Remove(vseg)
 	vseg = mm.vmas.Insert(mm.vmas.FindGap(newAR.Start), newAR, vma)
 	mm.usageAS = mm.usageAS - uint64(oldAR.Length()) + uint64(newAR.Length())
+	if vma.isPrivateDataLocked() {
+		mm.dataAS = mm.dataAS - uint64(oldAR.Length()) + uint64(newAR.Length())
+	}
 	if vma.mlockMode != memmap.MLockNone {
 		mm.lockedAS = mm.lockedAS - uint64(oldAR.Length()) + uint64(newAR.Length())
 	}
@@ -643,8 +659,16 @@ func (mm *MemoryManager) MProtect(addr usermem.Addr, length uint64, realPerms us
 
 		// Update vma permissions.
 		vma := vseg.ValuePtr()
+		vmaLength := vseg.Range().Length()
+		if vma.isPrivateDataLocked() {
+			mm.dataAS -= uint64(vmaLength)
+		}
+
 		vma.realPerms = realPerms
 		vma.effectivePerms = effectivePerms
+		if vma.isPrivateDataLocked() {
+			mm.dataAS += uint64(vmaLength)
+		}
 
 		// Propagate vma permission changes to pmas.
 		for pseg.Ok() && pseg.Start() < vseg.End() {
@@ -694,32 +718,31 @@ func (mm *MemoryManager) Brk(ctx context.Context, addr usermem.Addr) (usermem.Ad
 	// Can't defer mm.mappingMu.Unlock(); see below.
 
 	if addr < mm.brk.Start {
+		addr = mm.brk.End
 		mm.mappingMu.Unlock()
-		return mm.brk.End, syserror.EINVAL
+		return addr, syserror.EINVAL
 	}
 
-	// TODO: This enforces RLIMIT_DATA, but is slightly more
-	// permissive than the usual data limit. In particular, this only
-	// limits the size of the heap; a true RLIMIT_DATA limits the size of
-	// heap + data + bss. The segment sizes need to be plumbed from the
-	// loader package to fully enforce RLIMIT_DATA.
+	// TODO(gvisor.dev/issue/156): This enforces RLIMIT_DATA, but is
+	// slightly more permissive than the usual data limit. In particular,
+	// this only limits the size of the heap; a true RLIMIT_DATA limits the
+	// size of heap + data + bss. The segment sizes need to be plumbed from
+	// the loader package to fully enforce RLIMIT_DATA.
 	if uint64(addr-mm.brk.Start) > limits.FromContext(ctx).Get(limits.Data).Cur {
+		addr = mm.brk.End
 		mm.mappingMu.Unlock()
-		return mm.brk.End, syserror.ENOMEM
+		return addr, syserror.ENOMEM
 	}
 
 	oldbrkpg, _ := mm.brk.End.RoundUp()
 	newbrkpg, ok := addr.RoundUp()
 	if !ok {
+		addr = mm.brk.End
 		mm.mappingMu.Unlock()
-		return mm.brk.End, syserror.EFAULT
+		return addr, syserror.EFAULT
 	}
 
 	switch {
-	case newbrkpg < oldbrkpg:
-		mm.unmapLocked(ctx, usermem.AddrRange{newbrkpg, oldbrkpg})
-		mm.mappingMu.Unlock()
-
 	case oldbrkpg < newbrkpg:
 		vseg, ar, err := mm.createVMALocked(ctx, memmap.MMapOpts{
 			Length: uint64(newbrkpg - oldbrkpg),
@@ -736,21 +759,26 @@ func (mm *MemoryManager) Brk(ctx context.Context, addr usermem.Addr) (usermem.Ad
 			Hint:      "[heap]",
 		})
 		if err != nil {
+			addr = mm.brk.End
 			mm.mappingMu.Unlock()
-			return mm.brk.End, err
+			return addr, err
 		}
+		mm.brk.End = addr
 		if mm.defMLockMode == memmap.MLockEager {
 			mm.populateVMAAndUnlock(ctx, vseg, ar, true)
 		} else {
 			mm.mappingMu.Unlock()
 		}
 
+	case newbrkpg < oldbrkpg:
+		mm.unmapLocked(ctx, usermem.AddrRange{newbrkpg, oldbrkpg})
+		fallthrough
+
 	default:
-		// Nothing to do.
+		mm.brk.End = addr
 		mm.mappingMu.Unlock()
 	}
 
-	mm.brk.End = addr
 	return addr, nil
 }
 
@@ -1146,7 +1174,7 @@ func (mm *MemoryManager) GetSharedFutexKey(ctx context.Context, addr usermem.Add
 func (mm *MemoryManager) VirtualMemorySize() uint64 {
 	mm.mappingMu.RLock()
 	defer mm.mappingMu.RUnlock()
-	return uint64(mm.usageAS)
+	return mm.usageAS
 }
 
 // VirtualMemorySizeRange returns the combined length in bytes of all mappings
@@ -1161,12 +1189,19 @@ func (mm *MemoryManager) VirtualMemorySizeRange(ar usermem.AddrRange) uint64 {
 func (mm *MemoryManager) ResidentSetSize() uint64 {
 	mm.activeMu.RLock()
 	defer mm.activeMu.RUnlock()
-	return uint64(mm.curRSS)
+	return mm.curRSS
 }
 
 // MaxResidentSetSize returns the value advertised as mm's max RSS in bytes.
 func (mm *MemoryManager) MaxResidentSetSize() uint64 {
 	mm.activeMu.RLock()
 	defer mm.activeMu.RUnlock()
-	return uint64(mm.maxRSS)
+	return mm.maxRSS
+}
+
+// VirtualDataSize returns the size of private data segments in mm.
+func (mm *MemoryManager) VirtualDataSize() uint64 {
+	mm.mappingMu.RLock()
+	defer mm.mappingMu.RUnlock()
+	return mm.dataAS
 }

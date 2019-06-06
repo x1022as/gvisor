@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"syscall"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.googlesource.com/gvisor/pkg/control/server"
@@ -100,6 +101,8 @@ const (
 	StartCPUProfile = "Profile.StartCPUProfile"
 	StopCPUProfile  = "Profile.StopCPUProfile"
 	HeapProfile     = "Profile.HeapProfile"
+	StartTrace      = "Profile.StartTrace"
+	StopTrace       = "Profile.StopTrace"
 )
 
 // ControlSocketAddr generates an abstract unix socket name for the given ID.
@@ -210,12 +213,6 @@ type StartArgs struct {
 func (cm *containerManager) Start(args *StartArgs, _ *struct{}) error {
 	log.Debugf("containerManager.Start: %+v", args)
 
-	defer func() {
-		for _, f := range args.FilePayload.Files {
-			f.Close()
-		}
-	}()
-
 	// Validate arguments.
 	if args == nil {
 		return errors.New("start missing arguments")
@@ -231,7 +228,7 @@ func (cm *containerManager) Start(args *StartArgs, _ *struct{}) error {
 	}
 	// Prevent CIDs containing ".." from confusing the sentry when creating
 	// /containers/<cid> directory.
-	// TODO: Once we have multiple independent roots, this
+	// TODO(b/129293409): Once we have multiple independent roots, this
 	// check won't be necessary.
 	if path.Clean(args.CID) != args.CID {
 		return fmt.Errorf("container ID shouldn't contain directory traversals such as \"..\": %q", args.CID)
@@ -240,7 +237,7 @@ func (cm *containerManager) Start(args *StartArgs, _ *struct{}) error {
 		return fmt.Errorf("start arguments must contain stdin, stderr, and stdout followed by at least one file for the container root gofer")
 	}
 
-	err := cm.l.startContainer(cm.l.k, args.Spec, args.Conf, args.CID, args.FilePayload.Files)
+	err := cm.l.startContainer(args.Spec, args.Conf, args.CID, args.FilePayload.Files)
 	if err != nil {
 		log.Debugf("containerManager.Start failed %q: %+v: %v", args.CID, args, err)
 		return err
@@ -307,24 +304,28 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	var specFile, deviceFile *os.File
 	switch numFiles := len(o.FilePayload.Files); numFiles {
 	case 2:
-		// The device file is donated to the platform, so don't Close
-		// it here.
-		deviceFile = o.FilePayload.Files[1]
+		// The device file is donated to the platform.
+		// Can't take ownership away from os.File. dup them to get a new FD.
+		fd, err := syscall.Dup(int(o.FilePayload.Files[1].Fd()))
+		if err != nil {
+			return fmt.Errorf("failed to dup file: %v", err)
+		}
+		deviceFile = os.NewFile(uintptr(fd), "platform device")
 		fallthrough
 	case 1:
 		specFile = o.FilePayload.Files[0]
-		defer specFile.Close()
 	case 0:
 		return fmt.Errorf("at least one file must be passed to Restore")
 	default:
 		return fmt.Errorf("at most two files may be passed to Restore")
 	}
 
+	networkStack := cm.l.k.NetworkStack()
 	// Destroy the old kernel and create a new kernel.
 	cm.l.k.Pause()
 	cm.l.k.Destroy()
 
-	p, err := createPlatform(cm.l.conf, int(deviceFile.Fd()))
+	p, err := createPlatform(cm.l.conf, deviceFile)
 	if err != nil {
 		return fmt.Errorf("creating platform: %v", err)
 	}
@@ -339,22 +340,18 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	cm.l.k = k
 
 	// Set up the restore environment.
-	fds := &fdDispenser{fds: cm.l.goferFDs}
-	renv, err := createRestoreEnvironment(cm.l.spec, cm.l.conf, fds)
+	mntr := newContainerMounter(cm.l.spec, "", cm.l.goferFDs, cm.l.k)
+	renv, err := mntr.createRestoreEnvironment(cm.l.conf)
 	if err != nil {
 		return fmt.Errorf("creating RestoreEnvironment: %v", err)
 	}
 	fs.SetRestoreEnvironment(*renv)
 
 	// Prepare to load from the state file.
-	networkStack, err := newEmptyNetworkStack(cm.l.conf, k)
-	if err != nil {
-		return fmt.Errorf("creating network: %v", err)
-	}
 	if eps, ok := networkStack.(*epsocket.Stack); ok {
-		stack.StackFromEnv = eps.Stack // FIXME
+		stack.StackFromEnv = eps.Stack // FIXME(b/36201077)
 	}
-	info, err := o.FilePayload.Files[0].Stat()
+	info, err := specFile.Stat()
 	if err != nil {
 		return err
 	}
@@ -363,9 +360,7 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	}
 
 	// Load the state.
-	loadOpts := state.LoadOpts{
-		Source: o.FilePayload.Files[0],
-	}
+	loadOpts := state.LoadOpts{Source: specFile}
 	if err := loadOpts.Load(k, networkStack); err != nil {
 		return err
 	}
@@ -374,11 +369,11 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	k.Timekeeper().SetClocks(time.NewCalibratedClocks())
 
 	// Since we have a new kernel we also must make a new watchdog.
-	watchdog := watchdog.New(k, watchdog.DefaultTimeout, cm.l.conf.WatchdogAction)
+	dog := watchdog.New(k, watchdog.DefaultTimeout, cm.l.conf.WatchdogAction)
 
 	// Change the loader fields to reflect the changes made when restoring.
 	cm.l.k = k
-	cm.l.watchdog = watchdog
+	cm.l.watchdog = dog
 	cm.l.rootProcArgs = kernel.CreateProcessArgs{}
 	cm.l.restore = true
 
@@ -425,16 +420,12 @@ type WaitPIDArgs struct {
 
 	// CID is the container ID.
 	CID string
-
-	// ClearStatus determines whether the exit status of the process should
-	// be cleared when WaitPID returns.
-	ClearStatus bool
 }
 
 // WaitPID waits for the process with PID 'pid' in the sandbox.
 func (cm *containerManager) WaitPID(args *WaitPIDArgs, waitStatus *uint32) error {
 	log.Debugf("containerManager.Wait")
-	return cm.l.waitPID(kernel.ThreadID(args.PID), args.CID, args.ClearStatus, waitStatus)
+	return cm.l.waitPID(kernel.ThreadID(args.PID), args.CID, waitStatus)
 }
 
 // SignalDeliveryMode enumerates different signal delivery modes.

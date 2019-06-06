@@ -35,6 +35,8 @@ syscall_test(
 
 syscall_test(test = "//test/syscalls/linux:brk_test")
 
+syscall_test(test = "//test/syscalls/linux:socket_test")
+
 syscall_test(test = "//test/syscalls/linux:chdir_test")
 
 syscall_test(test = "//test/syscalls/linux:chmod_test")
@@ -191,7 +193,11 @@ syscall_test(test = "//test/syscalls/linux:partial_bad_buffer_test")
 
 syscall_test(test = "//test/syscalls/linux:pause_test")
 
-syscall_test(test = "//test/syscalls/linux:pipe_test")
+syscall_test(
+    size = "large",
+    shard_count = 5,
+    test = "//test/syscalls/linux:pipe_test",
+)
 
 syscall_test(test = "//test/syscalls/linux:poll_test")
 
@@ -214,6 +220,8 @@ syscall_test(test = "//test/syscalls/linux:priority_test")
 
 syscall_test(
     size = "medium",
+    # We don't want our proc changing out from under us.
+    parallel = False,
     test = "//test/syscalls/linux:proc_test",
 )
 
@@ -275,9 +283,11 @@ syscall_test(test = "//test/syscalls/linux:sendfile_socket_test")
 
 syscall_test(test = "//test/syscalls/linux:sendfile_test")
 
+syscall_test(test = "//test/syscalls/linux:splice_test")
+
 syscall_test(test = "//test/syscalls/linux:sigaction_test")
 
-# TODO: Enable once the test passes in runsc.
+# TODO(b/119826902): Enable once the test passes in runsc.
 # syscall_test(test = "//test/syscalls/linux:sigaltstack_test")
 
 syscall_test(test = "//test/syscalls/linux:sigiret_test")
@@ -408,13 +418,7 @@ syscall_test(
 )
 
 syscall_test(
-    size = "large",
-    shard_count = 10,
-    test = "//test/syscalls/linux:socket_unix_abstract_test",
-)
-
-syscall_test(
-    # NOTE: Large sendmsg may stall a long time.
+    # NOTE(b/116636318): Large sendmsg may stall a long time.
     size = "enormous",
     test = "//test/syscalls/linux:socket_unix_dgram_local_test",
 )
@@ -427,17 +431,11 @@ syscall_test(
 syscall_test(
     size = "large",
     shard_count = 10,
-    test = "//test/syscalls/linux:socket_unix_filesystem_test",
-)
-
-syscall_test(
-    size = "large",
-    shard_count = 10,
     test = "//test/syscalls/linux:socket_unix_pair_test",
 )
 
 syscall_test(
-    # NOTE: Large sendmsg may stall a long time.
+    # NOTE(b/116636318): Large sendmsg may stall a long time.
     size = "enormous",
     test = "//test/syscalls/linux:socket_unix_seqpacket_local_test",
 )

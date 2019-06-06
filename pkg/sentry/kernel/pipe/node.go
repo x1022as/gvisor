@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,7 +38,11 @@ type inodeOperations struct {
 	fsutil.InodeNotMappable          `state:"nosave"`
 	fsutil.InodeNotSocket            `state:"nosave"`
 	fsutil.InodeNotSymlink           `state:"nosave"`
-	fsutil.InodeNotVirtual           `state:"nosave"`
+
+	// Marking pipe inodes as virtual allows them to be saved and restored
+	// even if they have been unlinked. We can get away with this because
+	// their state exists entirely within the sentry.
+	fsutil.InodeVirtual `state:"nosave"`
 
 	fsutil.InodeSimpleAttributes
 
@@ -67,7 +71,6 @@ func NewInodeOperations(ctx context.Context, perms fs.FilePermissions, p *Pipe) 
 		InodeSimpleAttributes: fsutil.NewInodeSimpleAttributes(ctx, fs.FileOwnerFromContext(ctx), perms, linux.PIPEFS_MAGIC),
 		p:                     p,
 	}
-
 }
 
 // GetFile implements fs.InodeOperations.GetFile. Named pipes have special blocking
@@ -87,7 +90,7 @@ func (i *inodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags fs.Fi
 
 	switch {
 	case flags.Read && !flags.Write: // O_RDONLY.
-		r := i.p.ROpen(ctx)
+		r := i.p.Open(ctx, d, flags)
 		i.newHandleLocked(&i.rWakeup)
 
 		if i.p.isNamed && !flags.NonBlocking && !i.p.HasWriters() {
@@ -103,7 +106,7 @@ func (i *inodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags fs.Fi
 		return r, nil
 
 	case flags.Write && !flags.Read: // O_WRONLY.
-		w := i.p.WOpen(ctx)
+		w := i.p.Open(ctx, d, flags)
 		i.newHandleLocked(&i.wWakeup)
 
 		if i.p.isNamed && !i.p.HasReaders() {
@@ -123,7 +126,7 @@ func (i *inodeOperations) GetFile(ctx context.Context, d *fs.Dirent, flags fs.Fi
 
 	case flags.Read && flags.Write: // O_RDWR.
 		// Pipes opened for read-write always succeeds without blocking.
-		rw := i.p.RWOpen(ctx)
+		rw := i.p.Open(ctx, d, flags)
 		i.newHandleLocked(&i.rWakeup)
 		i.newHandleLocked(&i.wWakeup)
 		return rw, nil
@@ -190,4 +193,8 @@ func (*inodeOperations) newHandleLocked(wakeupChan *chan struct{}) {
 		close(*wakeupChan)
 		*wakeupChan = nil
 	}
+}
+
+func (*inodeOperations) Allocate(_ context.Context, _ *fs.Inode, _, _ int64) error {
+	return syserror.EPIPE
 }

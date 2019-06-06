@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -198,6 +198,10 @@ type endpoint struct {
 	// and dropped when it is.
 	segmentQueue segmentQueue `state:"wait"`
 
+	// synRcvdCount is the number of connections for this endpoint that are
+	// in SYN-RCVD state.
+	synRcvdCount int
+
 	// The following fields are used to manage the send buffer. When
 	// segments are ready to be sent, they are added to sndQueue and the
 	// protocol goroutine is signaled via sndWaker.
@@ -331,7 +335,7 @@ func newEndpoint(stack *stack.Stack, netProto tcpip.NetworkProtocolNumber, waite
 		e.probe = p
 	}
 
-	e.segmentQueue.setLimit(2 * e.rcvBufSize)
+	e.segmentQueue.setLimit(MaxUnprocessedSegments)
 	e.workMu.Init()
 	e.workMu.Lock()
 	e.tsOffset = timeStampOffset()
@@ -752,8 +756,6 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 			mask |= notifyNonZeroReceiveWindow
 		}
 		e.rcvListMu.Unlock()
-
-		e.segmentQueue.setLimit(2 * size)
 
 		e.notifyProtocolGoroutine(mask)
 		return nil
@@ -1199,21 +1201,24 @@ func (e *endpoint) Shutdown(flags tcpip.ShutdownFlags) *tcpip.Error {
 
 	switch e.state {
 	case stateConnected:
+		// Close for read.
+		if (e.shutdownFlags & tcpip.ShutdownRead) != 0 {
+			// Mark read side as closed.
+			e.rcvListMu.Lock()
+			e.rcvClosed = true
+			rcvBufUsed := e.rcvBufUsed
+			e.rcvListMu.Unlock()
+
+			// If we're fully closed and we have unread data we need to abort
+			// the connection with a RST.
+			if (e.shutdownFlags&tcpip.ShutdownWrite) != 0 && rcvBufUsed > 0 {
+				e.notifyProtocolGoroutine(notifyReset)
+				return nil
+			}
+		}
+
 		// Close for write.
 		if (e.shutdownFlags & tcpip.ShutdownWrite) != 0 {
-			if (e.shutdownFlags & tcpip.ShutdownRead) != 0 {
-				// We're fully closed, if we have unread data we need to abort
-				// the connection with a RST.
-				e.rcvListMu.Lock()
-				rcvBufUsed := e.rcvBufUsed
-				e.rcvListMu.Unlock()
-
-				if rcvBufUsed > 0 {
-					e.notifyProtocolGoroutine(notifyReset)
-					return nil
-				}
-			}
-
 			e.sndBufMu.Lock()
 
 			if e.sndClosed {
@@ -1299,7 +1304,6 @@ func (e *endpoint) Listen(backlog int) (err *tcpip.Error) {
 	}
 	e.workerRunning = true
 
-	e.stack.Stats().TCP.PassiveConnectionOpenings.Increment()
 	go e.protocolListenLoop( // S/R-SAFE: drained on save.
 		seqnum.Size(e.receiveBufferAvailable()))
 
@@ -1336,6 +1340,7 @@ func (e *endpoint) Accept() (tcpip.Endpoint, *waiter.Queue, *tcpip.Error) {
 	// Start the protocol goroutine.
 	wq := &waiter.Queue{}
 	n.startAcceptedLoop(wq)
+	e.stack.Stats().TCP.PassiveConnectionOpenings.Increment()
 
 	return n, wq, nil
 }
@@ -1443,6 +1448,13 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, vv
 	if !s.parse() {
 		e.stack.Stats().MalformedRcvdPackets.Increment()
 		e.stack.Stats().TCP.InvalidSegmentsReceived.Increment()
+		s.decRef()
+		return
+	}
+
+	if !s.csumValid {
+		e.stack.Stats().MalformedRcvdPackets.Increment()
+		e.stack.Stats().TCP.ChecksumErrors.Increment()
 		s.decRef()
 		return
 	}
@@ -1663,10 +1675,12 @@ func (e *endpoint) completeState() stack.TCPEndpointState {
 		LastSendTime: e.snd.lastSendTime,
 		DupAckCount:  e.snd.dupAckCount,
 		FastRecovery: stack.TCPFastRecoveryState{
-			Active:  e.snd.fr.active,
-			First:   e.snd.fr.first,
-			Last:    e.snd.fr.last,
-			MaxCwnd: e.snd.fr.maxCwnd,
+			Active:    e.snd.fr.active,
+			First:     e.snd.fr.first,
+			Last:      e.snd.fr.last,
+			MaxCwnd:   e.snd.fr.maxCwnd,
+			HighRxt:   e.snd.fr.highRxt,
+			RescueRxt: e.snd.fr.rescueRxt,
 		},
 		SndCwnd:          e.snd.sndCwnd,
 		Ssthresh:         e.snd.sndSsthresh,
@@ -1710,7 +1724,7 @@ func (e *endpoint) initGSO() {
 	}
 
 	gso := &stack.GSO{}
-	switch e.netProto {
+	switch e.route.NetProto {
 	case header.IPv4ProtocolNumber:
 		gso.Type = stack.GSOTCPv4
 		gso.L3HdrLen = header.IPv4MinimumSize
@@ -1721,7 +1735,7 @@ func (e *endpoint) initGSO() {
 		panic(fmt.Sprintf("Unknown netProto: %v", e.netProto))
 	}
 	gso.NeedsCsum = true
-	gso.CsumOffset = header.TCPChecksumOffset()
+	gso.CsumOffset = header.TCPChecksumOffset
 	gso.MaxSize = e.route.GSOMaxSize()
 	e.gso = gso
 }

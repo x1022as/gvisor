@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -187,6 +187,7 @@ func runTestCaseRunsc(testBin string, tc gtest.TestCase, t *testing.T) {
 		"--network=none",
 		"-log-format=text",
 		"-TESTONLY-unsafe-nonroot=true",
+		"--net-raw=true",
 	}
 	if *debug {
 		args = append(args, "-debug", "-log-packets=true")

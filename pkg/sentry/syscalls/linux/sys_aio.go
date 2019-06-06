@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -120,7 +120,7 @@ func IoDestroy(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 		// Does not exist.
 		return 0, nil, syserror.EINVAL
 	}
-	// FIXME: Linux blocks until all AIO to the destroyed context is
+	// FIXME(fvoznika): Linux blocks until all AIO to the destroyed context is
 	// done.
 	return 0, nil, nil
 }

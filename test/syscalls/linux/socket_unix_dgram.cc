@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ namespace testing {
 namespace {
 
 TEST_P(DgramUnixSocketPairTest, WriteOneSideClosed) {
-  // FIXME: gVisor datagram sockets return EPIPE instead of
+  // FIXME(b/35925052): gVisor datagram sockets return EPIPE instead of
   // ECONNREFUSED.
   SKIP_IF(IsRunningOnGvisor());
 

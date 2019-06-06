@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,11 +60,12 @@ const (
 
 // handshake holds the state used during a TCP 3-way handshake.
 type handshake struct {
-	ep     *endpoint
-	state  handshakeState
-	active bool
-	flags  uint8
-	ackNum seqnum.Value
+	ep       *endpoint
+	listenEP *endpoint // only non nil when doing passive connects.
+	state    handshakeState
+	active   bool
+	flags    uint8
+	ackNum   seqnum.Value
 
 	// iss is the initial send sequence number, as defined in RFC 793.
 	iss seqnum.Value
@@ -141,7 +142,7 @@ func (h *handshake) effectiveRcvWndScale() uint8 {
 
 // resetToSynRcvd resets the state of the handshake object to the SYN-RCVD
 // state.
-func (h *handshake) resetToSynRcvd(iss seqnum.Value, irs seqnum.Value, opts *header.TCPSynOptions) {
+func (h *handshake) resetToSynRcvd(iss seqnum.Value, irs seqnum.Value, opts *header.TCPSynOptions, listenEP *endpoint) {
 	h.active = false
 	h.state = handshakeSynRcvd
 	h.flags = header.TCPFlagSyn | header.TCPFlagAck
@@ -149,6 +150,7 @@ func (h *handshake) resetToSynRcvd(iss seqnum.Value, irs seqnum.Value, opts *hea
 	h.ackNum = irs + 1
 	h.mss = opts.MSS
 	h.sndWndScale = opts.WS
+	h.listenEP = listenEP
 }
 
 // checkAck checks if the ACK number, if present, of a segment received during
@@ -279,7 +281,23 @@ func (h *handshake) synRcvdState(s *segment) *tcpip.Error {
 	// We have previously received (and acknowledged) the peer's SYN. If the
 	// peer acknowledges our SYN, the handshake is completed.
 	if s.flagIsSet(header.TCPFlagAck) {
-
+		// listenContext is also used by a tcp.Forwarder and in that
+		// context we do not have a listening endpoint to check the
+		// backlog. So skip this check if listenEP is nil.
+		if h.listenEP != nil {
+			h.listenEP.mu.Lock()
+			if len(h.listenEP.acceptedChan) == cap(h.listenEP.acceptedChan) {
+				h.listenEP.mu.Unlock()
+				// If there is no space in the accept queue to accept
+				// this endpoint then silently drop this ACK. The peer
+				// will anyway resend the ack and we can complete the
+				// connection the next time it's retransmitted.
+				h.ep.stack.Stats().TCP.ListenOverflowAckDrop.Increment()
+				h.ep.stack.Stats().DroppedPackets.Increment()
+				return nil
+			}
+			h.listenEP.mu.Unlock()
+		}
 		// If the timestamp option is negotiated and the segment does
 		// not carry a timestamp option then the segment must be dropped
 		// as per https://tools.ietf.org/html/rfc7323#section-3.2.
@@ -595,7 +613,7 @@ func sendTCP(r *stack.Route, id stack.TransportEndpointID, data buffer.Vectorise
 		// TCP header, then the kernel calculate a checksum of the
 		// header and data and get the right sum of the TCP packet.
 		tcp.SetChecksum(xsum)
-	} else if r.Capabilities()&stack.CapabilityChecksumOffload == 0 {
+	} else if r.Capabilities()&stack.CapabilityTXChecksumOffload == 0 {
 		xsum = header.ChecksumVV(data, xsum)
 		tcp.SetChecksum(^tcp.CalculateChecksum(xsum))
 	}
@@ -790,7 +808,7 @@ func (e *endpoint) keepaliveTimerExpired() *tcpip.Error {
 	// seg.seq = snd.nxt-1.
 	e.keepalive.unacked++
 	e.keepalive.Unlock()
-	e.snd.sendSegment(buffer.VectorisedView{}, header.TCPFlagAck, e.snd.sndNxt-1)
+	e.snd.sendSegmentFromView(buffer.VectorisedView{}, header.TCPFlagAck, e.snd.sndNxt-1)
 	e.resetKeepaliveTimer(false)
 	return nil
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ TEST_P(UnboundUnixSeqpacketSocketPairTest, SendtoWithoutConnect) {
 }
 
 TEST_P(UnboundUnixSeqpacketSocketPairTest, SendtoWithoutConnectIgnoresAddr) {
-  // FIXME: gVisor tries to find /foo/bar and thus returns ENOENT.
+  // FIXME(b/68223466): gVisor tries to find /foo/bar and thus returns ENOENT.
   if (IsRunningOnGvisor()) {
     return;
   }
@@ -71,7 +71,7 @@ TEST_P(UnboundUnixSeqpacketSocketPairTest, SendtoWithoutConnectIgnoresAddr) {
       SyscallFailsWithErrno(ENOTCONN));
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     AllUnixDomainSockets, UnboundUnixSeqpacketSocketPairTest,
     ::testing::ValuesIn(IncludeReversals(VecCat<SocketPairKind>(
         ApplyVec<SocketPairKind>(

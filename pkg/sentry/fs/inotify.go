@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -171,9 +171,19 @@ func (i *Inotify) Read(ctx context.Context, _ *File, dst usermem.IOSequence, _ i
 	return writeLen, nil
 }
 
+// WriteTo implements FileOperations.WriteTo.
+func (*Inotify) WriteTo(context.Context, *File, *File, SpliceOpts) (int64, error) {
+	return 0, syserror.ENOSYS
+}
+
 // Fsync implements FileOperations.Fsync.
 func (*Inotify) Fsync(context.Context, *File, int64, int64, SyncType) error {
 	return syserror.EINVAL
+}
+
+// ReadFrom implements FileOperations.ReadFrom.
+func (*Inotify) ReadFrom(context.Context, *File, *File, SpliceOpts) (int64, error) {
+	return 0, syserror.ENOSYS
 }
 
 // Flush implements FileOperations.Flush.
@@ -184,6 +194,11 @@ func (*Inotify) Flush(context.Context, *File) error {
 // ConfigureMMap implements FileOperations.ConfigureMMap.
 func (*Inotify) ConfigureMMap(context.Context, *File, *memmap.MMapOpts) error {
 	return syserror.ENODEV
+}
+
+// UnstableAttr implements FileOperations.UnstableAttr.
+func (i *Inotify) UnstableAttr(ctx context.Context, file *File) (UnstableAttr, error) {
+	return file.Dirent.Inode.UnstableAttr(ctx)
 }
 
 // Ioctl implements fs.FileOperations.Ioctl.

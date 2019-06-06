@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -135,6 +135,10 @@ type CachedFileObject interface {
 	// the file was opened.
 	SetMaskedAttributes(ctx context.Context, mask fs.AttrMask, attr fs.UnstableAttr) error
 
+	// Allocate allows the caller to reserve disk space for the inode.
+	// It's equivalent to fallocate(2) with 'mode=0'.
+	Allocate(ctx context.Context, offset int64, length int64) error
+
 	// Sync instructs the remote filesystem to sync the file to stable storage.
 	Sync(ctx context.Context) error
 
@@ -175,11 +179,22 @@ func (c *CachingInodeOperations) Release() {
 	defer c.mapsMu.Unlock()
 	c.dataMu.Lock()
 	defer c.dataMu.Unlock()
-	// The cache should be empty (something has gone terribly wrong if we're
-	// releasing an inode that is still memory-mapped).
-	if !c.mappings.IsEmpty() || !c.cache.IsEmpty() || !c.dirty.IsEmpty() {
-		panic(fmt.Sprintf("Releasing CachingInodeOperations with mappings:\n%s\ncache contents:\n%s\ndirty segments:\n%s", &c.mappings, &c.cache, &c.dirty))
+
+	// Something has gone terribly wrong if we're releasing an inode that is
+	// still memory-mapped.
+	if !c.mappings.IsEmpty() {
+		panic(fmt.Sprintf("Releasing CachingInodeOperations with mappings:\n%s", &c.mappings))
 	}
+
+	// Drop any cached pages that are still awaiting MemoryFile eviction. (This
+	// means that MemoryFile no longer needs to evict them.)
+	mf := c.mfp.MemoryFile()
+	mf.MarkAllUnevictable(c)
+	if err := SyncDirtyAll(context.Background(), &c.cache, &c.dirty, uint64(c.attr.Size), mf, c.backingFile.WriteFromBlocksAt); err != nil {
+		panic(fmt.Sprintf("Failed to writeback cached data: %v", err))
+	}
+	c.cache.DropAll(mf)
+	c.dirty.RemoveAll()
 }
 
 // UnstableAttr implements fs.InodeOperations.UnstableAttr.
@@ -284,7 +299,7 @@ func (c *CachingInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, 
 	}
 	oldSize := c.attr.Size
 	c.attr.Size = size
-	c.touchModificationTimeLocked(now)
+	c.touchModificationAndStatusChangeTimeLocked(now)
 
 	// We drop c.dataMu here so that we can lock c.mapsMu and invalidate
 	// mappings below. This allows concurrent calls to Read/Translate/etc.
@@ -325,6 +340,30 @@ func (c *CachingInodeOperations) Truncate(ctx context.Context, inode *fs.Inode, 
 	return nil
 }
 
+// Allocate implements fs.InodeOperations.Allocate.
+func (c *CachingInodeOperations) Allocate(ctx context.Context, offset, length int64) error {
+	newSize := offset + length
+
+	// c.attr.Size is protected by both c.attrMu and c.dataMu.
+	c.attrMu.Lock()
+	defer c.attrMu.Unlock()
+	c.dataMu.Lock()
+	defer c.dataMu.Unlock()
+
+	if newSize <= c.attr.Size {
+		return nil
+	}
+
+	now := ktime.NowFromContext(ctx)
+	if err := c.backingFile.Allocate(ctx, offset, length); err != nil {
+		return err
+	}
+
+	c.attr.Size = newSize
+	c.touchModificationAndStatusChangeTimeLocked(now)
+	return nil
+}
+
 // WriteOut implements fs.InodeOperations.WriteOut.
 func (c *CachingInodeOperations) WriteOut(ctx context.Context, inode *fs.Inode) error {
 	c.attrMu.Lock()
@@ -355,19 +394,19 @@ func (c *CachingInodeOperations) WriteOut(ctx context.Context, inode *fs.Inode) 
 	return c.backingFile.Sync(ctx)
 }
 
-// IncLinks increases the link count and updates cached access time.
+// IncLinks increases the link count and updates cached modification time.
 func (c *CachingInodeOperations) IncLinks(ctx context.Context) {
 	c.attrMu.Lock()
 	c.attr.Links++
-	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
+	c.touchModificationAndStatusChangeTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
-// DecLinks decreases the link count and updates cached access time.
+// DecLinks decreases the link count and updates cached modification time.
 func (c *CachingInodeOperations) DecLinks(ctx context.Context) {
 	c.attrMu.Lock()
 	c.attr.Links--
-	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
+	c.touchModificationAndStatusChangeTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
@@ -393,23 +432,31 @@ func (c *CachingInodeOperations) touchAccessTimeLocked(now time.Time) {
 	c.dirtyAttr.AccessTime = true
 }
 
-// TouchModificationTime updates the cached modification and status change time
-// in-place to the current time.
-func (c *CachingInodeOperations) TouchModificationTime(ctx context.Context) {
+// TouchModificationAndStatusChangeTime updates the cached modification and
+// status change times in-place to the current time.
+func (c *CachingInodeOperations) TouchModificationAndStatusChangeTime(ctx context.Context) {
 	c.attrMu.Lock()
-	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
+	c.touchModificationAndStatusChangeTimeLocked(ktime.NowFromContext(ctx))
 	c.attrMu.Unlock()
 }
 
-// touchModificationTimeLocked updates the cached modification and status
-// change time in-place to the current time.
+// touchModificationAndStatusChangeTimeLocked updates the cached modification
+// and status change times in-place to the current time.
 //
 // Preconditions: c.attrMu is locked for writing.
-func (c *CachingInodeOperations) touchModificationTimeLocked(now time.Time) {
+func (c *CachingInodeOperations) touchModificationAndStatusChangeTimeLocked(now time.Time) {
 	c.attr.ModificationTime = now
 	c.dirtyAttr.ModificationTime = true
 	c.attr.StatusChangeTime = now
 	c.dirtyAttr.StatusChangeTime = true
+}
+
+// TouchStatusChangeTime updates the cached status change time in-place to the
+// current time.
+func (c *CachingInodeOperations) TouchStatusChangeTime(ctx context.Context) {
+	c.attrMu.Lock()
+	c.touchStatusChangeTimeLocked(ktime.NowFromContext(ctx))
+	c.attrMu.Unlock()
 }
 
 // touchStatusChangeTimeLocked updates the cached status change time
@@ -479,7 +526,7 @@ func (c *CachingInodeOperations) Read(ctx context.Context, file *fs.File, dst us
 	// common: getting a return value of 0 from a read syscall is the only way
 	// to detect EOF.
 	//
-	// TODO: Separate out c.attr.Size and use atomics instead of
+	// TODO(jamieliu): Separate out c.attr.Size and use atomics instead of
 	// c.dataMu.
 	c.dataMu.RLock()
 	size := c.attr.Size
@@ -507,7 +554,7 @@ func (c *CachingInodeOperations) Write(ctx context.Context, src usermem.IOSequen
 
 	c.attrMu.Lock()
 	// Compare Linux's mm/filemap.c:__generic_file_write_iter() => file_update_time().
-	c.touchModificationTimeLocked(ktime.NowFromContext(ctx))
+	c.touchModificationAndStatusChangeTimeLocked(ktime.NowFromContext(ctx))
 	n, err := src.CopyInTo(ctx, &inodeReadWriter{ctx, c, offset})
 	c.attrMu.Unlock()
 	return n, err
@@ -679,6 +726,13 @@ func (rw *inodeReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error
 	return done, nil
 }
 
+// useHostPageCache returns true if c uses c.backingFile.FD() for all file I/O
+// and memory mappings, and false if c.cache may contain data cached from
+// c.backingFile.
+func (c *CachingInodeOperations) useHostPageCache() bool {
+	return !c.forcePageCache && c.backingFile.FD() >= 0
+}
+
 // AddMapping implements memmap.Mappable.AddMapping.
 func (c *CachingInodeOperations) AddMapping(ctx context.Context, ms memmap.MappingSpace, ar usermem.AddrRange, offset uint64, writable bool) error {
 	// Hot path. Avoid defers.
@@ -689,7 +743,15 @@ func (c *CachingInodeOperations) AddMapping(ctx context.Context, ms memmap.Mappi
 	for _, r := range mapped {
 		c.hostFileMapper.IncRefOn(r)
 	}
-	if !usage.IncrementalMappedAccounting && !c.forcePageCache && c.backingFile.FD() >= 0 {
+	if !c.useHostPageCache() {
+		// c.Evict() will refuse to evict memory-mapped pages, so tell the
+		// MemoryFile to not bother trying.
+		mf := c.mfp.MemoryFile()
+		for _, r := range mapped {
+			mf.MarkUnevictable(c, pgalloc.EvictableRange{r.Start, r.End})
+		}
+	}
+	if c.useHostPageCache() && !usage.IncrementalMappedAccounting {
 		for _, r := range mapped {
 			usage.MemoryAccounting.Inc(r.Length(), usage.Mapped)
 		}
@@ -706,7 +768,7 @@ func (c *CachingInodeOperations) RemoveMapping(ctx context.Context, ms memmap.Ma
 	for _, r := range unmapped {
 		c.hostFileMapper.DecRefOn(r)
 	}
-	if !c.forcePageCache && c.backingFile.FD() >= 0 {
+	if c.useHostPageCache() {
 		if !usage.IncrementalMappedAccounting {
 			for _, r := range unmapped {
 				usage.MemoryAccounting.Dec(r.Length(), usage.Mapped)
@@ -716,17 +778,16 @@ func (c *CachingInodeOperations) RemoveMapping(ctx context.Context, ms memmap.Ma
 		return
 	}
 
-	// Writeback dirty mapped memory now that there are no longer any
-	// mappings that reference it. This is our naive memory eviction
-	// strategy.
+	// Pages that are no longer referenced by any application memory mappings
+	// are now considered unused; allow MemoryFile to evict them when
+	// necessary.
 	mf := c.mfp.MemoryFile()
 	c.dataMu.Lock()
 	for _, r := range unmapped {
-		if err := SyncDirty(ctx, r, &c.cache, &c.dirty, uint64(c.attr.Size), mf, c.backingFile.WriteFromBlocksAt); err != nil {
-			log.Warningf("Failed to writeback cached data %v: %v", r, err)
-		}
-		c.cache.Drop(r, mf)
-		c.dirty.KeepClean(r)
+		// Since these pages are no longer mapped, they are no longer
+		// concurrently dirtyable by a writable memory mapping.
+		c.dirty.AllowClean(r)
+		mf.MarkEvictable(c, pgalloc.EvictableRange{r.Start, r.End})
 	}
 	c.dataMu.Unlock()
 	c.mapsMu.Unlock()
@@ -740,7 +801,7 @@ func (c *CachingInodeOperations) CopyMapping(ctx context.Context, ms memmap.Mapp
 // Translate implements memmap.Mappable.Translate.
 func (c *CachingInodeOperations) Translate(ctx context.Context, required, optional memmap.MappableRange, at usermem.AccessType) ([]memmap.Translation, error) {
 	// Hot path. Avoid defer.
-	if !c.forcePageCache && c.backingFile.FD() >= 0 {
+	if c.useHostPageCache() {
 		return []memmap.Translation{
 			{
 				Source: optional,
@@ -776,7 +837,7 @@ func (c *CachingInodeOperations) Translate(ctx context.Context, required, option
 	var translatedEnd uint64
 	for seg := c.cache.FindSegment(required.Start); seg.Ok() && seg.Start() < required.End; seg, _ = seg.NextNonEmpty() {
 		segMR := seg.Range().Intersect(optional)
-		// TODO: Make Translations writable even if writability is
+		// TODO(jamieliu): Make Translations writable even if writability is
 		// not required if already kept-dirty by another writable translation.
 		perms := usermem.AccessType{
 			Read:    true,
@@ -851,6 +912,29 @@ func (c *CachingInodeOperations) InvalidateUnsavable(ctx context.Context) error 
 	c.dirty.RemoveAll()
 
 	return nil
+}
+
+// Evict implements pgalloc.EvictableMemoryUser.Evict.
+func (c *CachingInodeOperations) Evict(ctx context.Context, er pgalloc.EvictableRange) {
+	c.mapsMu.Lock()
+	defer c.mapsMu.Unlock()
+	c.dataMu.Lock()
+	defer c.dataMu.Unlock()
+
+	mr := memmap.MappableRange{er.Start, er.End}
+	mf := c.mfp.MemoryFile()
+	// Only allow pages that are no longer memory-mapped to be evicted.
+	for mgap := c.mappings.LowerBoundGap(mr.Start); mgap.Ok() && mgap.Start() < mr.End; mgap = mgap.NextGap() {
+		mgapMR := mgap.Range().Intersect(mr)
+		if mgapMR.Length() == 0 {
+			continue
+		}
+		if err := SyncDirty(ctx, mgapMR, &c.cache, &c.dirty, uint64(c.attr.Size), mf, c.backingFile.WriteFromBlocksAt); err != nil {
+			log.Warningf("Failed to writeback cached data %v: %v", mgapMR, err)
+		}
+		c.cache.Drop(mgapMR, mf)
+		c.dirty.KeepClean(mgapMR)
+	}
 }
 
 // IncRef implements platform.File.IncRef. This is used when we directly map an

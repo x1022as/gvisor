@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -94,9 +94,9 @@ TEST_P(CorrectVDSOClockTest, IsCorrect) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(ClockGettime, CorrectVDSOClockTest,
-                        ::testing::Values(CLOCK_MONOTONIC, CLOCK_REALTIME),
-                        PrintClockId);
+INSTANTIATE_TEST_SUITE_P(ClockGettime, CorrectVDSOClockTest,
+                         ::testing::Values(CLOCK_MONOTONIC, CLOCK_REALTIME),
+                         PrintClockId);
 
 }  // namespace
 

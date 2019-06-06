@@ -20,6 +20,7 @@ go_library(
     srcs = [
         "endpoint.go",
         "endpoint_state.go",
+        "forwarder.go",
         "protocol.go",
         "udp_packet_list.go",
     ],
@@ -27,12 +28,12 @@ go_library(
     imports = ["gvisor.googlesource.com/gvisor/pkg/tcpip/buffer"],
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/log",
         "//pkg/sleep",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
         "//pkg/tcpip/header",
         "//pkg/tcpip/stack",
+        "//pkg/tcpip/transport/raw",
         "//pkg/waiter",
     ],
 )

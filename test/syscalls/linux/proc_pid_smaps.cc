@@ -1,4 +1,4 @@
-// Copyright 2019 Google LLC
+// Copyright 2019 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -81,7 +82,7 @@ struct ProcPidSmapsEntry {
 // Given the value part of a /proc/[pid]/smaps field containing a value in kB
 // (for example, "    4 kB", returns the value in kB (in this example, 4).
 PosixErrorOr<size_t> SmapsValueKb(absl::string_view value) {
-  // TODO: let us use RE2 or <regex>
+  // TODO(jamieliu): let us use RE2 or <regex>
   std::pair<absl::string_view, absl::string_view> parts =
       absl::StrSplit(value, ' ', absl::SkipEmpty());
   if (parts.second != "kB") {
@@ -172,7 +173,7 @@ PosixErrorOr<std::vector<ProcPidSmapsEntry>> ParseProcPidSmaps(
       return;
     }
     unknown_fields.insert(std::string(key));
-    LOG(INFO) << "skipping unknown smaps field " << key;
+    std::cerr << "skipping unknown smaps field " << key;
   };
 
   auto lines = absl::StrSplit(contents, '\n', absl::SkipEmpty());
@@ -189,8 +190,8 @@ PosixErrorOr<std::vector<ProcPidSmapsEntry>> ParseProcPidSmaps(
     // "key:value" (where value in practice will be preceded by a variable
     // amount of whitespace).
     if (!entry) {
-      LOG(WARNING) << "smaps line not considered a maps line: "
-                   << maybe_maps_entry.error_message();
+      std::cerr << "smaps line not considered a maps line: "
+                << maybe_maps_entry.error_message();
       return PosixError(
           EINVAL,
           absl::StrCat("smaps field line without preceding maps line: ", l));

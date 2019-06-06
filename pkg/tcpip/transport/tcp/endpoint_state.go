@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -163,7 +163,7 @@ func (e *endpoint) loadState(state endpointState) {
 // afterLoad is invoked by stateify.
 func (e *endpoint) afterLoad() {
 	e.stack = stack.StackFromEnv
-	e.segmentQueue.setLimit(2 * e.rcvBufSize)
+	e.segmentQueue.setLimit(MaxUnprocessedSegments)
 	e.workMu.Init()
 
 	state := e.state
@@ -341,6 +341,7 @@ func loadError(s string) *tcpip.Error {
 			tcpip.ErrMessageTooLong,
 			tcpip.ErrNoBufferSpace,
 			tcpip.ErrBroadcastDisabled,
+			tcpip.ErrNotPermitted,
 		}
 
 		messageToError = make(map[string]*tcpip.Error)

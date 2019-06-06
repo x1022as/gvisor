@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@ TEST(StatfsTest, NameLen) {
   struct statfs st;
   EXPECT_THAT(statfs("/dev/shm", &st), SyscallSucceeds());
 
+  // This assumes that /dev/shm is tmpfs.
   EXPECT_EQ(st.f_namelen, NAME_MAX);
 }
 

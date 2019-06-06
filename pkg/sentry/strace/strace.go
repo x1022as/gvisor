@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 	"gvisor.googlesource.com/gvisor/pkg/seccomp"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/kdefs"
 	pb "gvisor.googlesource.com/gvisor/pkg/sentry/strace/strace_go_proto"
 	slinux "gvisor.googlesource.com/gvisor/pkg/sentry/syscalls/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usermem"
@@ -130,6 +131,35 @@ func path(t *kernel.Task, addr usermem.Addr) string {
 		return fmt.Sprintf("%#x (error decoding path: %s)", addr, err)
 	}
 	return fmt.Sprintf("%#x %s", addr, path)
+}
+
+func fd(t *kernel.Task, fd kdefs.FD) string {
+	root := t.FSContext().RootDirectory()
+	if root != nil {
+		defer root.DecRef()
+	}
+
+	if fd == linux.AT_FDCWD {
+		wd := t.FSContext().WorkingDirectory()
+		var name string
+		if wd != nil {
+			defer wd.DecRef()
+			name, _ = wd.FullName(root)
+		} else {
+			name = "(unknown cwd)"
+		}
+		return fmt.Sprintf("AT_FDCWD %s", name)
+	}
+
+	file := t.FDMap().GetFile(fd)
+	if file == nil {
+		// Cast FD to uint64 to avoid printing negative hex.
+		return fmt.Sprintf("%#x (bad FD)", uint64(fd))
+	}
+	defer file.DecRef()
+
+	name, _ := file.Dirent.FullName(root)
+	return fmt.Sprintf("%#x %s", fd, name)
 }
 
 func fdpair(t *kernel.Task, addr usermem.Addr) string {
@@ -344,6 +374,8 @@ func (i *SyscallInfo) pre(t *kernel.Task, args arch.SyscallArguments, maximumBlo
 			break
 		}
 		switch i.format[arg] {
+		case FD:
+			output = append(output, fd(t, kdefs.FD(args[arg].Int())))
 		case WriteBuffer:
 			output = append(output, dump(t, args[arg].Pointer(), args[arg+1].SizeT(), maximumBlobSize))
 		case WriteIOVec:
@@ -406,6 +438,8 @@ func (i *SyscallInfo) pre(t *kernel.Task, args arch.SyscallArguments, maximumBlo
 			output = append(output, capHeader(t, args[arg].Pointer()))
 		case CapData:
 			output = append(output, capData(t, args[arg-1].Pointer(), args[arg].Pointer()))
+		case PollFDs:
+			output = append(output, pollFDs(t, args[arg].Pointer(), uint(args[arg+1].Uint()), false))
 		case Oct:
 			output = append(output, "0o"+strconv.FormatUint(args[arg].Uint64(), 8))
 		case Hex:
@@ -470,6 +504,8 @@ func (i *SyscallInfo) post(t *kernel.Task, args arch.SyscallArguments, rval uint
 			output[arg] = sigAction(t, args[arg].Pointer())
 		case PostCapData:
 			output[arg] = capData(t, args[arg-1].Pointer(), args[arg].Pointer())
+		case PollFDs:
+			output[arg] = pollFDs(t, args[arg].Pointer(), uint(args[arg+1].Uint()), true)
 		}
 	}
 }
@@ -686,8 +722,8 @@ func (s SyscallMap) Name(sysno uintptr) string {
 // N.B. This is not in an init function because we can't be sure all syscall
 // tables are registered with the kernel when init runs.
 //
-// TODO: remove kernel package dependencies from this package and
-// have the kernel package self-initialize all syscall tables.
+// TODO(gvisor.dev/issue/155): remove kernel package dependencies from this
+// package and have the kernel package self-initialize all syscall tables.
 func Initialize() {
 	for _, table := range kernel.SyscallTables() {
 		// Is this known?

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,7 +60,7 @@ func (tc *TaskContext) release() {
 	// Nil out pointers so that if the task is saved after release, it doesn't
 	// follow the pointers to possibly now-invalid objects.
 	if tc.MemoryManager != nil {
-		// TODO
+		// TODO(b/38173783)
 		tc.MemoryManager.DecUsers(context.Background())
 		tc.MemoryManager = nil
 	}

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -305,7 +305,7 @@ func (c *context64) PtracePeekUser(addr uintptr) (interface{}, error) {
 		buf := binary.Marshal(nil, usermem.ByteOrder, c.ptraceGetRegs())
 		return c.Native(uintptr(usermem.ByteOrder.Uint64(buf[addr:]))), nil
 	}
-	// TODO: debug registers
+	// TODO(b/34088053): debug registers
 	return c.Native(0), nil
 }
 
@@ -320,6 +320,6 @@ func (c *context64) PtracePokeUser(addr, data uintptr) error {
 		_, err := c.PtraceSetRegs(bytes.NewBuffer(buf))
 		return err
 	}
-	// TODO: debug registers
+	// TODO(b/34088053): debug registers
 	return nil
 }

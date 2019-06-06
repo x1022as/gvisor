@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -185,7 +185,7 @@ func Madvise(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	case linux.MADV_MERGEABLE, linux.MADV_UNMERGEABLE:
 		fallthrough
 	case linux.MADV_DONTDUMP, linux.MADV_DODUMP:
-		// TODO: Core dumping isn't implemented, so these are
+		// TODO(b/72045799): Core dumping isn't implemented, so these are
 		// no-ops.
 		fallthrough
 	case linux.MADV_NORMAL, linux.MADV_RANDOM, linux.MADV_SEQUENTIAL, linux.MADV_WILLNEED:
@@ -223,7 +223,7 @@ func GetMempolicy(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.
 	nodeFlag := flags&linux.MPOL_F_NODE != 0
 	addrFlag := flags&linux.MPOL_F_ADDR != 0
 
-	// TODO: Once sysfs is implemented, report a single numa node in
+	// TODO(rahat): Once sysfs is implemented, report a single numa node in
 	// /sys/devices/system/node.
 	if nodemask != 0 && maxnode < 1 {
 		return 0, nil, syserror.EINVAL

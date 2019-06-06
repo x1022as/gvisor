@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -113,13 +113,17 @@ func (l *LimitSet) SetUnchecked(t LimitType, v Limit) {
 }
 
 // Set assigns value v to resource of LimitType t and returns the old value.
-func (l *LimitSet) Set(t LimitType, v Limit) (Limit, error) {
+// privileged should be true only when either the caller has CAP_SYS_RESOURCE
+// or when creating limits for a new kernel.
+func (l *LimitSet) Set(t LimitType, v Limit, privileged bool) (Limit, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	// If a limit is already set, make sure the new limit doesn't
 	// exceed the previous max limit.
 	if _, ok := l.data[t]; ok {
-		if l.data[t].Max < v.Max {
+		// Unprivileged users can only lower their hard limits.
+		if l.data[t].Max < v.Max && !privileged {
 			return Limit{}, syscall.EPERM
 		}
 		if v.Cur > v.Max {

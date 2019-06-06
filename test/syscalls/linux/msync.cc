@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -93,9 +93,9 @@ TEST_P(MsyncNoMappingTest, UnmappedAddressWithNonzeroLengthFails) {
               SyscallFailsWithErrno(ENOMEM));
 }
 
-INSTANTIATE_TEST_CASE_P(All, MsyncNoMappingTest,
-                        ::testing::Combine(::testing::ValuesIn(kMsyncFlags),
-                                           ::testing::Values(NoMappings)));
+INSTANTIATE_TEST_SUITE_P(All, MsyncNoMappingTest,
+                         ::testing::Combine(::testing::ValuesIn(kMsyncFlags),
+                                            ::testing::Values(NoMappings)));
 
 // "Fixture" for msync tests that are not parameterized by msync flags, but do
 // create mappings.
@@ -107,7 +107,7 @@ TEST_P(MsyncNoFlagsTest, BothSyncAndAsyncFails) {
               SyscallFailsWithErrno(EINVAL));
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     All, MsyncNoFlagsTest,
     ::testing::Combine(::testing::Values(0),  // ignored
                        ::testing::ValuesIn(SyncableMappings())));
@@ -142,7 +142,7 @@ TEST_P(MsyncFullParamTest, InvalidateUnlockedSucceeds) {
 // The test for MS_INVALIDATE on mlocked pages is in mlock.cc since it requires
 // probing for mlock support.
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     All, MsyncFullParamTest,
     ::testing::Combine(::testing::ValuesIn(kMsyncFlags),
                        ::testing::ValuesIn(SyncableMappings())));

@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -194,7 +194,7 @@ TEST(LseekTest, EtcPasswdDup) {
   ASSERT_THAT(lseek(fd3.get(), 0, SEEK_CUR), SyscallSucceedsWithValue(1000));
 }
 
-// TODO: Add tests where we have donated in sockets.
+// TODO(magi): Add tests where we have donated in sockets.
 
 }  // namespace
 

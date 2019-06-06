@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ const (
 	// rtSignalCap is the maximum number of instances of a given realtime
 	// signal that may be pending.
 	//
-	// TODO: In Linux, the minimum signal queue size is
+	// TODO(igudger): In Linux, the minimum signal queue size is
 	// RLIMIT_SIGPENDING, which is by default max_threads/2.
 	rtSignalCap = 32
 )

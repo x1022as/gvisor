@@ -1,4 +1,4 @@
-// Copyright 2018 Google LLC
+// Copyright 2018 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,7 +49,6 @@ type Exec struct {
 	extraKGIDs      stringSlice
 	caps            stringSlice
 	detach          bool
-	clearStatus     bool
 	processPath     string
 	pidFile         string
 	internalPidFile string
@@ -101,9 +100,6 @@ func (ex *Exec) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&ex.pidFile, "pid-file", "", "filename that the container pid will be written to")
 	f.StringVar(&ex.internalPidFile, "internal-pid-file", "", "filename that the container-internal pid will be written to")
 	f.StringVar(&ex.consoleSocket, "console-socket", "", "path to an AF_UNIX socket which will receive a file descriptor referencing the master end of the console's pseudoterminal")
-
-	// clear-status is expected to only be set when we fork due to --detach being set.
-	f.BoolVar(&ex.clearStatus, "clear-status", true, "clear the status of the exec'd process upon completion")
 }
 
 // Execute implements subcommands.Command.Execute. It starts a process in an
@@ -132,7 +128,11 @@ func (ex *Exec) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 		}
 	}
 	if e.Capabilities == nil {
-		e.Capabilities, err = specutils.Capabilities(c.Spec.Process.Capabilities)
+		// enableRaw is set to true to prevent the filtering out of
+		// CAP_NET_RAW. This is the opposite of Create() because exec
+		// requires the capability to be set explicitly, while 'docker
+		// run' sets it by default.
+		e.Capabilities, err = specutils.Capabilities(true /* enableRaw */, c.Spec.Process.Capabilities)
 		if err != nil {
 			Fatalf("creating capabilities: %v", err)
 		}
@@ -149,7 +149,7 @@ func (ex *Exec) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 	// Start the new process and get it pid.
 	pid, err := c.Execute(e)
 	if err != nil {
-		Fatalf("getting processes for container: %v", err)
+		Fatalf("executing processes for container: %v", err)
 	}
 
 	if e.StdioIsPty {
@@ -177,7 +177,7 @@ func (ex *Exec) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 	}
 
 	// Wait for the process to exit.
-	ws, err := c.WaitPID(pid, ex.clearStatus)
+	ws, err := c.WaitPID(pid)
 	if err != nil {
 		Fatalf("waiting on pid %d: %v", pid, err)
 	}
@@ -186,8 +186,12 @@ func (ex *Exec) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 }
 
 func (ex *Exec) execAndWait(waitStatus *syscall.WaitStatus) subcommands.ExitStatus {
-	binPath := specutils.ExePath
 	var args []string
+	for _, a := range os.Args[1:] {
+		if !strings.Contains(a, "detach") {
+			args = append(args, a)
+		}
+	}
 
 	// The command needs to write a pid file so that execAndWait can tell
 	// when it has started. If no pid-file was provided, we should use a
@@ -203,19 +207,7 @@ func (ex *Exec) execAndWait(waitStatus *syscall.WaitStatus) subcommands.ExitStat
 		args = append(args, "--pid-file="+pidFile)
 	}
 
-	// Add the rest of the args, excluding the "detach" flag.
-	for _, a := range os.Args[1:] {
-		if strings.Contains(a, "detach") {
-			// Replace with the "clear-status" flag, which tells
-			// the new process it's a detached child and shouldn't
-			// clear the exit status of the sentry process.
-			args = append(args, "--clear-status=false")
-		} else {
-			args = append(args, a)
-		}
-	}
-
-	cmd := exec.Command(binPath, args...)
+	cmd := exec.Command(specutils.ExePath, args...)
 	cmd.Args[0] = "runsc-exec"
 
 	// Exec stdio defaults to current process stdio.
@@ -226,8 +218,7 @@ func (ex *Exec) execAndWait(waitStatus *syscall.WaitStatus) subcommands.ExitStat
 	// If the console control socket file is provided, then create a new
 	// pty master/slave pair and set the TTY on the sandbox process.
 	if ex.consoleSocket != "" {
-		// Create a new TTY pair and send the master on the provided
-		// socket.
+		// Create a new TTY pair and send the master on the provided socket.
 		tty, err := console.NewWithSocket(ex.consoleSocket)
 		if err != nil {
 			Fatalf("setting up console with socket %q: %v", ex.consoleSocket, err)
@@ -249,7 +240,7 @@ func (ex *Exec) execAndWait(waitStatus *syscall.WaitStatus) subcommands.ExitStat
 		Fatalf("failure to start child exec process, err: %v", err)
 	}
 
-	log.Infof("Started child (PID: %d) to exec and wait: %s %s", cmd.Process.Pid, binPath, args)
+	log.Infof("Started child (PID: %d) to exec and wait: %s %s", cmd.Process.Pid, specutils.ExePath, args)
 
 	// Wait for PID file to ensure that child process has started. Otherwise,
 	// '--process' file is deleted as soon as this process returns and the child
@@ -351,7 +342,11 @@ func argsFromProcess(p *specs.Process) (*control.ExecArgs, error) {
 	var caps *auth.TaskCapabilities
 	if p.Capabilities != nil {
 		var err error
-		caps, err = specutils.Capabilities(p.Capabilities)
+		// enableRaw is set to true to prevent the filtering out of
+		// CAP_NET_RAW. This is the opposite of Create() because exec
+		// requires the capability to be set explicitly, while 'docker
+		// run' sets it by default.
+		caps, err = specutils.Capabilities(true /* enableRaw */, p.Capabilities)
 		if err != nil {
 			return nil, fmt.Errorf("error creating capabilities: %v", err)
 		}
@@ -413,7 +408,11 @@ func capabilities(cs []string) (*auth.TaskCapabilities, error) {
 		specCaps.Inheritable = append(specCaps.Inheritable, cap)
 		specCaps.Permitted = append(specCaps.Permitted, cap)
 	}
-	return specutils.Capabilities(&specCaps)
+	// enableRaw is set to true to prevent the filtering out of
+	// CAP_NET_RAW. This is the opposite of Create() because exec requires
+	// the capability to be set explicitly, while 'docker run' sets it by
+	// default.
+	return specutils.Capabilities(true /* enableRaw */, &specCaps)
 }
 
 // stringSlice allows a flag to be used multiple times, where each occurrence
